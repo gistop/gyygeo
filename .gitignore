@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local environment
+.env
+
+# Engine runtime data
+apps/carto-engine/data/*
+!apps/carto-engine/data/.gitkeep
+apps/carto-engine/outputs/*
+!apps/carto-engine/outputs/.gitkeep
+apps/carto-engine/logs/*
+!apps/carto-engine/logs/.gitkeep
+
+# ArcGIS working files
+*.lock
+*.sr.lock

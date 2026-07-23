@@ -1,0 +1,14 @@
+{
+  "requested_by": "local-dev",
+  "dry_run": true,
+  "project": {
+    "project_name": "demo-map",
+    "template_id": "default",
+    "title": "Demo Map",
+    "layers": [],
+    "export": {
+      "format": "png",
+      "dpi": 150
+    }
+  }
+}
