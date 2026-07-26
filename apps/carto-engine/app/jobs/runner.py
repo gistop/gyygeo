@@ -70,5 +70,10 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Render job %s failed", job_id)
             output_dir.mkdir(parents=True, exist_ok=True)
-            log_path.write_text(traceback.format_exc(), encoding="utf-8")
+            runner_traceback = "RUNNER TRACEBACK:\n" + traceback.format_exc()
+            if log_path.exists() and log_path.stat().st_size > 0:
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write("\n\n" + runner_traceback)
+            else:
+                log_path.write_text(runner_traceback, encoding="utf-8")
             self.store.update_job(job_id, status="failed", error=str(exc))

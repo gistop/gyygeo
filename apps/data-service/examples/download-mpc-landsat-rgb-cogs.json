@@ -1,0 +1,6 @@
+{
+  "provider": "mpc",
+  "collection": "landsat-c2-l2",
+  "item_id": "LC08_L2SP_118039_20250627_02_T1",
+  "assets": ["red", "green", "blue"]
+}

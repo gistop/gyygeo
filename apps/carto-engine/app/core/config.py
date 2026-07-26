@@ -40,7 +40,7 @@ def _load_env_file(path: Path) -> None:
 
 def _default_project_python() -> Path:
     local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return local_app_data / "ESRI" / "conda" / "envs" / "gyygeo-py3" / "python.exe"
+    return local_app_data / "ESRI" / "conda" / "envs" / "gyygeo-carto-py3" / "python.exe"
 
 
 @dataclass(frozen=True)

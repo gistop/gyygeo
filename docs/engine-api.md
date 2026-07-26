@@ -52,6 +52,39 @@ Example:
 
 Response status is `202 Accepted`. Poll the returned job ID.
 
+### Known Working GeoTIFF Example
+
+This example renders the prepared data-service GeoTIFF through the default template. The template
+layout is named `布局`, so the request must use that exact `layout_name`.
+
+```json
+{
+  "requested_by": "local-dev",
+  "dry_run": false,
+  "project": {
+    "project_name": "landsat-map",
+    "template_id": "default",
+    "title": "Landsat Map",
+    "layers": [
+      {
+        "id": "landsat-raster",
+        "name": "Landsat Raster",
+        "data_source": "C:\\Users\\Administrator\\gyygeo\\apps\\data-service\\cache\\prepared\\ds_98f7772650d74a9ebdb89788a8ae23f9.tif",
+        "visible": true,
+        "opacity": 1.0
+      }
+    ],
+    "fit_to_layers": true,
+    "fit_layer_names": ["Landsat Raster"],
+    "export": {
+      "format": "png",
+      "dpi": 150,
+      "layout_name": "布局"
+    }
+  }
+}
+```
+
 ### Layer Removal and Auto Fit
 
 `remove_layers` removes existing template layers by exact layer name before new layers are added.
@@ -88,7 +121,7 @@ Example:
     "export": {
       "format": "png",
       "dpi": 150,
-      "layout_name": "Layout1"
+      "layout_name": "布局"
     }
   }
 }

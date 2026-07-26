@@ -4,13 +4,13 @@ $Script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Script:ArcGisBaseEnv = "C:\Program Files\ArcGIS\Pro\bin\Python\envs\arcgispro-py3"
 $Script:ArcGisBasePython = Join-Path $Script:ArcGisBaseEnv "python.exe"
 $Script:ArcGisConda = "C:\Program Files\ArcGIS\Pro\bin\Python\Scripts\conda.exe"
-$Script:ProjectEnvName = "gyygeo-carto-py3"
+$Script:ProjectEnvName = "gyygeo-data-py3"
 $Script:ProjectEnvDir = Join-Path $env:LOCALAPPDATA "ESRI\conda\envs\$Script:ProjectEnvName"
 $Script:DefaultProjectPython = Join-Path $Script:ProjectEnvDir "python.exe"
 
-function Get-GyyGeoCartoPython {
-    if ($env:GYYGEO_CARTO_PYTHON_EXE) {
-        return [Environment]::ExpandEnvironmentVariables($env:GYYGEO_CARTO_PYTHON_EXE)
+function Get-GyyGeoDataPython {
+    if ($env:GYYGEO_DATA_PYTHON_EXE) {
+        return [Environment]::ExpandEnvironmentVariables($env:GYYGEO_DATA_PYTHON_EXE)
     }
 
     return $Script:DefaultProjectPython
@@ -47,6 +47,6 @@ function Assert-ProjectPython {
     $resolvedBase = (Resolve-Path -LiteralPath $Script:ArcGisBasePython).Path
 
     if ($resolvedProject -eq $resolvedBase) {
-        throw "Refusing to use the original ArcGIS Pro Python environment. Use the cloned gyygeo-carto-py3 environment instead."
+        throw "Refusing to use the original ArcGIS Pro Python environment. Use the gyygeo-data-py3 environment instead."
     }
 }

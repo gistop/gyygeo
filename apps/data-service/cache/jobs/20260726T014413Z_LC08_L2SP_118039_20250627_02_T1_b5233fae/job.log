@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "C:\Users\Administrator\gyygeo\apps\data-service\app\providers\mpc.py", line 118, in prepare_raster
+    src = rasterio.open(href)
+  File "C:\Users\Administrator\AppData\Local\ESRI\conda\envs\gyygeo-py3\Lib\site-packages\rasterio\env.py", line 464, in wrapper
+    return f(*args, **kwds)
+  File "C:\Users\Administrator\AppData\Local\ESRI\conda\envs\gyygeo-py3\Lib\site-packages\rasterio\__init__.py", line 379, in open
+    dataset = DatasetReader(path, driver=driver, sharing=sharing, thread_safe=thread_safe, **kwargs)
+  File "rasterio/_base.pyx", line 320, in rasterio._base.DatasetBase.__init__
+  File "rasterio/_base.pyx", line 232, in rasterio._base.open_dataset
+  File "rasterio/_err.pyx", line 357, in rasterio._err.exc_wrap_pointer
+  File "rasterio/_err.pyx", line 195, in rasterio._err.exc_check
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xb0 in position 91: invalid start byte
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Administrator\gyygeo\apps\data-service\app\jobs\runner.py", line 90, in _run_prepare_raster
+    prepared = provider.prepare_raster(request, output_path)
+  File "C:\Users\Administrator\gyygeo\apps\data-service\app\providers\mpc.py", line 120, in prepare_raster
+    raise RuntimeError(
+    ...<2 lines>...
+    ) from exc
+RuntimeError: GDAL/rasterio could not open the signed MPC COG asset. Verify that the running environment supports remote HTTPS COG reads.

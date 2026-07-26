@@ -1,0 +1,15 @@
+{
+  "provider": "mpc",
+  "collection": "landsat-c2-l2",
+  "item_id": "REPLACE_WITH_SEARCH_ITEM_ID",
+  "bbox": [116.1, 39.7, 116.7, 40.2],
+  "bbox_crs": "EPSG:4326",
+  "bands": ["red", "green", "blue"],
+  "target_resolution": 120,
+  "target_crs": "EPSG:3857",
+  "output": {
+    "format": "geotiff",
+    "purpose": "carto-render"
+  }
+}
+

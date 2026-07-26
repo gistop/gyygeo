@@ -12,7 +12,7 @@ ArcPy rendering is executed in a worker subprocess. The API process does not imp
 
 - Windows
 - ArcGIS Pro installed and licensed
-- Dedicated `gyygeo-py3` Python environment cloned from ArcGIS Pro Python
+- Dedicated `gyygeo-carto-py3` Python environment cloned from ArcGIS Pro Python
 - FastAPI and Uvicorn installed in the Python environment that runs the service
 
 ## Python Environment
@@ -35,7 +35,7 @@ If environment creation is interrupted and leaves a partial folder, reset it and
 The default project environment is:
 
 ```text
-%LOCALAPPDATA%\ESRI\conda\envs\gyygeo-py3
+%LOCALAPPDATA%\ESRI\conda\envs\gyygeo-carto-py3
 ```
 
 ## Development Start
@@ -46,7 +46,7 @@ From `apps/carto-engine`:
 .\scripts\run-dev.ps1
 ```
 
-This project should use the dedicated `gyygeo-py3` environment. Do not rely on the bare `python` command on Windows machines where old Python versions may be installed.
+This project should use the dedicated `gyygeo-carto-py3` environment. Do not rely on the bare `python` command on Windows machines where old Python versions may be installed.
 
 ## Install API Dependencies
 
@@ -76,6 +76,10 @@ Then verify the runtime:
 2. Submit a render job to `POST /api/v1/render/preview`.
 3. Poll `GET /api/v1/jobs/{job_id}` until the status is `done` or `failed`.
 4. Read output paths from the job result.
+
+The bundled/default template currently uses a layout named `布局`. Requests that specify
+`layout_name` must match the actual ArcGIS Pro layout name exactly. A working GeoTIFF render request
+is documented in `docs/engine-api.md`.
 
 ## Dry Run
 

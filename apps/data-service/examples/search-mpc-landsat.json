@@ -1,0 +1,9 @@
+{
+  "provider": "mpc",
+  "collection": "landsat-c2-l2",
+  "bbox": [116.1, 39.7, 116.7, 40.2],
+  "datetime": "2025-07-01/2025-07-31",
+  "limit": 10,
+  "cloud_cover_lte": 20
+}
+
