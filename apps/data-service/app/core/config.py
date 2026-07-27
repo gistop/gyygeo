@@ -26,6 +26,11 @@ def _path_env(name: str, default: str) -> Path:
     return Path(os.path.expandvars(_env(name, default) or default))
 
 
+def _csv_env(name: str, default: str) -> list[str]:
+    raw = _env(name, default) or default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -53,6 +58,7 @@ class Settings:
     log_dir: Path
     database_path: Path
     mpc_stac_url: str
+    cors_origins: list[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -82,6 +88,12 @@ class Settings:
                 "https://planetarycomputer.microsoft.com/api/stac/v1",
             )
             or "https://planetarycomputer.microsoft.com/api/stac/v1",
+            cors_origins=_csv_env(
+                "GYYGEO_DATA_CORS_ORIGINS",
+                "http://127.0.0.1:5173,http://localhost:5173,"
+                "http://127.0.0.1:5174,http://localhost:5174,"
+                "http://127.0.0.1:5175,http://localhost:5175",
+            ),
         )
 
     def ensure_directories(self) -> None:
@@ -94,4 +106,3 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings.from_env()
-

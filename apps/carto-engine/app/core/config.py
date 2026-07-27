@@ -26,6 +26,11 @@ def _path_env(name: str, default: str) -> Path:
     return Path(os.path.expandvars(_env(name, default) or default))
 
 
+def _csv_env(name: str, default: str) -> list[str]:
+    raw = _env(name, default) or default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -60,6 +65,7 @@ class Settings:
     log_dir: Path
     template_dir: Path
     database_path: Path
+    cors_origins: list[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -87,6 +93,12 @@ class Settings:
             log_dir=log_dir,
             template_dir=template_dir,
             database_path=_path_env("GYYGEO_CARTO_DATABASE_PATH", str(data_dir / "jobs.sqlite3")),
+            cors_origins=_csv_env(
+                "GYYGEO_CARTO_CORS_ORIGINS",
+                "http://127.0.0.1:5173,http://localhost:5173,"
+                "http://127.0.0.1:5174,http://localhost:5174,"
+                "http://127.0.0.1:5175,http://localhost:5175",
+            ),
         )
 
     def ensure_directories(self) -> None:

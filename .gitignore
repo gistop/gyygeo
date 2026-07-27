@@ -7,6 +7,11 @@ __pycache__/
 .venv/
 venv/
 
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
 # Local environment
 .env
 
@@ -17,6 +22,10 @@ apps/carto-engine/outputs/*
 !apps/carto-engine/outputs/.gitkeep
 apps/carto-engine/logs/*
 !apps/carto-engine/logs/.gitkeep
+apps/data-service/cache/*
+!apps/data-service/cache/.gitkeep
+apps/data-service/data/*
+!apps/data-service/data/.gitkeep
 
 # ArcGIS working files
 *.lock

@@ -3,13 +3,18 @@
 ## Current Scope
 
 The first implementation scope was `apps/carto-engine`. The workspace now also includes
-`apps/data-service` for data acquisition and render-ready raster preparation.
+`apps/data-service` for data acquisition and render-ready raster preparation, and
+`apps/carto-web` for browser-based workflow control.
 
 `carto-engine` is a Windows backend service. It owns ArcPy rendering, job execution, project template access, and output files. Browser, desktop, mobile, and customer preview clients should access it through HTTP APIs.
 
 `data-service` is a backend service. It owns external data provider access, dataset discovery,
 COG/raster preparation, cache paths, and dataset records. `carto-engine` should consume prepared
 datasets instead of talking directly to external providers.
+
+`carto-web` is a browser client. It owns the interactive bbox/map UI, service health checks,
+workflow forms, API calls, job polling, and output display. It should not import ArcPy or raster
+provider libraries.
 
 ## Target Module Layout
 
@@ -26,7 +31,7 @@ gyygeo/
   docs/
 ```
 
-`apps/carto-engine` and `apps/data-service` are implemented now.
+`apps/carto-engine`, `apps/data-service`, and `apps/carto-web` are implemented now.
 
 ## Data Service Boundaries
 
@@ -42,6 +47,13 @@ gyygeo/
 - Job layer: records status and runs long tasks outside the request path.
 - ArcPy layer: runs ArcPy inside a worker subprocess.
 - Storage layer: manages runtime paths and output files.
+
+## Web Boundaries
+
+- Map layer: displays a MapLibre basemap and selected bbox.
+- Form layer: collects provider, search, preparation, and render parameters.
+- API layer: calls `data-service` and `carto-engine` through HTTP.
+- Job layer: polls backend job records and displays terminal output paths.
 
 ## Production Notes
 

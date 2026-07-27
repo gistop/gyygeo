@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.datasets import router as datasets_router
 from app.api.routes.downloads import router as downloads_router
@@ -55,6 +56,14 @@ def create_app() -> FastAPI:
         description="Data acquisition and render-ready raster preparation service for gyygeo.",
         lifespan=lifespan,
     )
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     app.include_router(health_router)
     app.include_router(providers_router, prefix=settings.api_prefix)
     app.include_router(searches_router, prefix=settings.api_prefix)
