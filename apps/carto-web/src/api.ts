@@ -1,4 +1,6 @@
 import type {
+  AiChatPayload,
+  AiChatResponse,
   HealthResponse,
   JobCreateResponse,
   JobRecord,
@@ -11,6 +13,9 @@ import type {
 export const config = {
   dataServiceUrl: trimSlash(
     import.meta.env.VITE_DATA_SERVICE_URL ?? "http://127.0.0.1:8010",
+  ),
+  cartoWebApiUrl: trimSlash(
+    import.meta.env.VITE_CARTO_WEB_API_URL ?? "http://127.0.0.1:8020",
   ),
   cartoEngineUrl: trimSlash(
     import.meta.env.VITE_CARTO_ENGINE_URL ?? "http://127.0.0.1:8000",
@@ -50,6 +55,10 @@ export function getDataHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>(`${config.dataServiceUrl}/health`);
 }
 
+export function getCartoWebApiHealth(): Promise<HealthResponse> {
+  return requestJson<HealthResponse>(`${config.cartoWebApiUrl}/health`);
+}
+
 export function getCartoHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>(`${config.cartoEngineUrl}/health`);
 }
@@ -81,4 +90,11 @@ export function renderPreview(payload: RenderPayload): Promise<JobCreateResponse
 
 export function getCartoJob(jobId: string): Promise<JobRecord> {
   return requestJson<JobRecord>(`${config.cartoEngineUrl}/api/v1/jobs/${jobId}`);
+}
+
+export function sendAiChat(payload: AiChatPayload): Promise<AiChatResponse> {
+  return requestJson<AiChatResponse>(`${config.cartoWebApiUrl}/api/v1/ai/chat`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

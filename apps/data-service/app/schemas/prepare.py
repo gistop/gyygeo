@@ -15,6 +15,7 @@ class PrepareRasterRequest(BaseModel):
     collection: str = Field(..., min_length=1)
     item_id: str = Field(..., min_length=1)
     bbox: List[float] = Field(..., min_length=4, max_length=4)
+    geometry: Optional[Dict[str, Any]] = None
     bbox_crs: str = "EPSG:4326"
     bands: List[str] = Field(..., min_length=1)
     target_resolution: Optional[float] = Field(default=None, gt=0.0)

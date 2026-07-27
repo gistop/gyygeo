@@ -1,4 +1,11 @@
 export type Bbox = [number, number, number, number];
+export type LngLatPair = [number, number];
+export type AoiMode = "rectangle" | "polygon";
+
+export interface PolygonGeometry {
+  type: "Polygon";
+  coordinates: LngLatPair[][];
+}
 
 export type JobStatus = "pending" | "running" | "done" | "failed";
 
@@ -54,6 +61,7 @@ export interface SearchPayload {
   provider: string;
   collection: string;
   bbox: Bbox;
+  geometry?: PolygonGeometry;
   datetime?: string;
   limit: number;
   cloud_cover_lte?: number;
@@ -64,6 +72,7 @@ export interface PreparePayload {
   collection: string;
   item_id: string;
   bbox: Bbox;
+  geometry?: PolygonGeometry;
   bbox_crs: string;
   bands: string[];
   target_resolution?: number;
@@ -98,4 +107,19 @@ export interface RenderPayload {
       layout_name?: string;
     };
   };
+}
+
+export interface AiChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AiChatPayload {
+  messages: AiChatMessage[];
+  context?: string;
+}
+
+export interface AiChatResponse {
+  message: AiChatMessage;
+  model: string;
 }

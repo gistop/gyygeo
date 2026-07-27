@@ -9,6 +9,7 @@ class SearchRequest(BaseModel):
     provider: str = Field(default="mpc", min_length=1)
     collection: str = Field(..., min_length=1)
     bbox: List[float] = Field(..., min_length=4, max_length=4)
+    geometry: Optional[Dict[str, Any]] = None
     datetime: Optional[str] = None
     limit: int = Field(default=10, ge=1, le=100)
     cloud_cover_lte: Optional[float] = Field(default=None, ge=0.0, le=100.0)
@@ -38,4 +39,3 @@ class SearchItem(BaseModel):
 
 class SearchResponse(BaseModel):
     items: List[SearchItem]
-

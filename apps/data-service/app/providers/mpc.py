@@ -68,13 +68,18 @@ class MpcProvider:
         if request.cloud_cover_lte is not None:
             query.setdefault("eo:cloud_cover", {"lte": request.cloud_cover_lte})
 
-        search = client.search(
-            collections=[request.collection],
-            bbox=request.bbox,
-            datetime=request.datetime,
-            query=query or None,
-            limit=request.limit,
-        )
+        search_kwargs: Dict[str, Any] = {
+            "collections": [request.collection],
+            "datetime": request.datetime,
+            "query": query or None,
+            "limit": request.limit,
+        }
+        if request.geometry:
+            search_kwargs["intersects"] = request.geometry
+        else:
+            search_kwargs["bbox"] = request.bbox
+
+        search = client.search(**search_kwargs)
         return [
             self._normalize_item(item, request.collection)
             for item in list(search.items())[: request.limit]
@@ -87,9 +92,10 @@ class MpcProvider:
         import rasterio  # type: ignore
         from rasterio.crs import CRS  # type: ignore
         from rasterio.enums import Resampling  # type: ignore
+        from rasterio.features import geometry_mask  # type: ignore
         from rasterio.transform import array_bounds
         from rasterio.vrt import WarpedVRT  # type: ignore
-        from rasterio.warp import transform_bounds  # type: ignore
+        from rasterio.warp import transform_bounds, transform_geom  # type: ignore
         from rasterio.windows import from_bounds  # type: ignore
 
         items = self._search_by_id(request.collection, request.item_id)
@@ -113,6 +119,7 @@ class MpcProvider:
 
         target_crs = CRS.from_string(request.target_crs) if request.target_crs else None
         bbox_crs = CRS.from_string(request.bbox_crs)
+        read_bounds = _geometry_bounds(request.geometry) if request.geometry else tuple(request.bbox)
         sources = []
         try:
             for href in hrefs:
@@ -124,7 +131,12 @@ class MpcProvider:
                         "Verify that the running environment supports remote HTTPS COG reads."
                     ) from exc
                 dst_crs = target_crs or src.crs
-                target_bounds = transform_bounds(bbox_crs, dst_crs, *request.bbox, densify_pts=21)
+                target_bounds = transform_bounds(bbox_crs, dst_crs, *read_bounds, densify_pts=21)
+                target_geometry = (
+                    transform_geom(bbox_crs, dst_crs, request.geometry)
+                    if request.geometry
+                    else None
+                )
 
                 if request.target_resolution is not None:
                     transform = _target_transform(target_bounds, request.target_resolution)
@@ -160,8 +172,13 @@ class MpcProvider:
                     target_bounds = transform_bounds(
                         bbox_crs,
                         vrt.crs,
-                        *request.bbox,
+                        *read_bounds,
                         densify_pts=21,
+                    )
+                    target_geometry = (
+                        transform_geom(bbox_crs, vrt.crs, request.geometry)
+                        if request.geometry
+                        else None
                     )
                     window = (
                         from_bounds(*target_bounds, transform=vrt.transform)
@@ -170,6 +187,14 @@ class MpcProvider:
                     )
                     data = vrt.read(1, window=window, boundless=True, masked=True)
                     transform = vrt.window_transform(window)
+                if target_geometry:
+                    inside_geometry = geometry_mask(
+                        [target_geometry],
+                        out_shape=data.shape,
+                        transform=transform,
+                        invert=True,
+                    )
+                    data = np.ma.array(data, mask=np.ma.getmaskarray(data) | ~inside_geometry)
                 sources.append((src, vrt, data, transform))
 
             arrays = [source[2] for source in sources]
@@ -222,6 +247,8 @@ class MpcProvider:
                     "item_id": request.item_id,
                     "asset_count": len(hrefs),
                     "bbox_crs": request.bbox_crs,
+                    "aoi_type": "polygon" if request.geometry else "bbox",
+                    "geometry": request.geometry,
                 },
             )
         finally:
@@ -369,6 +396,32 @@ def _safe_to_dict(value: Any) -> Dict[str, object]:
 def _target_transform(bounds: tuple[float, float, float, float], resolution: float) -> Any:
     left, _bottom, _right, top = bounds
     return from_origin(left, top, resolution, resolution)
+
+
+def _geometry_bounds(geometry: Dict[str, Any]) -> tuple[float, float, float, float]:
+    coordinates = geometry.get("coordinates")
+    if geometry.get("type") != "Polygon" or not isinstance(coordinates, list):
+        raise RuntimeError("Only GeoJSON Polygon AOI geometry is supported.")
+
+    points = []
+    for ring in coordinates:
+        if not isinstance(ring, list):
+            continue
+        for coordinate in ring:
+            if (
+                isinstance(coordinate, list)
+                and len(coordinate) >= 2
+                and isinstance(coordinate[0], (int, float))
+                and isinstance(coordinate[1], (int, float))
+            ):
+                points.append((float(coordinate[0]), float(coordinate[1])))
+
+    if len(points) < 4:
+        raise RuntimeError("Polygon AOI geometry must include at least three vertices.")
+
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _asset_filename(key: str, href: str) -> str:

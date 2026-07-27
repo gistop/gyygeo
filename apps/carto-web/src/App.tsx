@@ -2,29 +2,54 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import maplibregl, { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import {
+  Bot,
   CheckCircle2,
   Crosshair,
   Database,
   Loader2,
   Map,
+  Pentagon,
   Play,
+  Plus,
   RefreshCcw,
   Search,
+  SendHorizontal,
+  Sparkles,
+  Square,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import {
   config,
   getCartoHealth,
+  getCartoWebApiHealth,
   getCartoJob,
   getDataHealth,
   getDataJob,
   prepareRaster,
   renderPreview,
+  sendAiChat,
   searchItems,
 } from "./api";
-import type { Bbox, JobRecord, JobStatus, PreparePayload, SearchItem } from "./types";
+import type {
+  AiChatMessage,
+  AoiMode,
+  Bbox,
+  JobRecord,
+  JobStatus,
+  LngLatPair,
+  PolygonGeometry,
+  PreparePayload,
+  SearchItem,
+} from "./types";
 
 const initialBbox: Bbox = [116.1, 39.7, 116.7, 40.2];
+const initialPolygon: LngLatPair[] = [
+  [116.2, 39.78],
+  [116.58, 39.82],
+  [116.5, 40.1],
+  [116.24, 40.06],
+];
 
 export function App() {
   const [provider, setProvider] = useState("mpc");
@@ -32,7 +57,9 @@ export function App() {
   const [datetime, setDatetime] = useState("2025-07-01/2025-07-31");
   const [cloudCover, setCloudCover] = useState("20");
   const [limit, setLimit] = useState("10");
+  const [aoiMode, setAoiMode] = useState<AoiMode>("rectangle");
   const [bbox, setBbox] = useState<Bbox>(initialBbox);
+  const [polygonCoordinates, setPolygonCoordinates] = useState<LngLatPair[]>(initialPolygon);
   const [bands, setBands] = useState("red,green,blue");
   const [targetResolution, setTargetResolution] = useState("120");
   const [targetCrs, setTargetCrs] = useState("EPSG:3857");
@@ -47,21 +74,38 @@ export function App() {
     queryKey: ["health", "data"],
     queryFn: getDataHealth,
   });
+  const webApiHealth = useQuery({
+    queryKey: ["health", "carto-web-api"],
+    queryFn: getCartoWebApiHealth,
+  });
   const cartoHealth = useQuery({
     queryKey: ["health", "carto"],
     queryFn: getCartoHealth,
   });
 
+  const activeGeometry = useMemo(() => {
+    return aoiMode === "polygon" ? polygonGeometry(polygonCoordinates) : undefined;
+  }, [aoiMode, polygonCoordinates]);
+  const activeBbox = useMemo(() => {
+    return activeGeometry ? bboxFromCoordinates(polygonCoordinates) : bbox;
+  }, [activeGeometry, bbox, polygonCoordinates]);
+
   const searchMutation = useMutation({
     mutationFn: () =>
-      searchItems({
+      {
+        if (aoiMode === "polygon" && !activeGeometry) {
+          throw new Error("多边形范围至少需要 3 个顶点。");
+        }
+        return searchItems({
         provider,
         collection,
-        bbox,
+        bbox: activeBbox,
+        geometry: activeGeometry,
         datetime: datetime.trim() || undefined,
         limit: clampInt(limit, 1, 100, 10),
         cloud_cover_lte: optionalNumber(cloudCover),
-      }),
+        });
+      },
     onSuccess: (response) => {
       setSelectedItem(response.items[0] ?? null);
       setPrepareJobId(null);
@@ -74,11 +118,15 @@ export function App() {
       if (!selectedItem) {
         throw new Error("请先选择一个数据项。");
       }
+      if (aoiMode === "polygon" && !activeGeometry) {
+        throw new Error("多边形范围至少需要 3 个顶点。");
+      }
       const payload: PreparePayload = {
         provider,
         collection,
         item_id: selectedItem.item_id,
-        bbox,
+        bbox: activeBbox,
+        geometry: activeGeometry,
         bbox_crs: "EPSG:4326",
         bands: splitCsv(bands),
         target_resolution: optionalNumber(targetResolution),
@@ -162,6 +210,36 @@ export function App() {
   const canRender =
     dryRun ||
     (prepareJob.data?.status === "done" && Boolean(preparedDatasetPath) && !renderMutation.isPending);
+  const aiContext = useMemo(() => {
+    return [
+      `Provider: ${provider}`,
+      `Collection: ${collection}`,
+      `Datetime: ${datetime}`,
+      `AOI type: ${aoiMode}`,
+      `BBOX: ${activeBbox.join(", ")}`,
+      `Polygon vertices: ${aoiMode === "polygon" ? polygonCoordinates.length : "-"}`,
+      `Bands: ${bands}`,
+      `Target CRS: ${targetCrs}`,
+      `Selected item: ${selectedItem?.item_id ?? "-"}`,
+      `Prepare job: ${prepareJob.data?.status ?? "-"}`,
+      `Prepared dataset: ${preparedDatasetPath ?? "-"}`,
+      `Render job: ${renderJob.data?.status ?? "-"}`,
+      `Preview: ${extractPreviewPath(renderJob.data) ?? "-"}`,
+    ].join("\n");
+  }, [
+    activeBbox,
+    aoiMode,
+    bands,
+    collection,
+    datetime,
+    polygonCoordinates,
+    preparedDatasetPath,
+    prepareJob.data,
+    provider,
+    renderJob.data,
+    selectedItem,
+    targetCrs,
+  ]);
 
   return (
     <main className="shell">
@@ -176,6 +254,7 @@ export function App() {
               className="icon-button"
               onClick={() => {
                 void dataHealth.refetch();
+                void webApiHealth.refetch();
                 void cartoHealth.refetch();
               }}
               title="刷新服务状态"
@@ -187,6 +266,7 @@ export function App() {
 
           <div className="service-grid">
             <ServicePill label="data-service" query={dataHealth} url={config.dataServiceUrl} />
+            <ServicePill label="carto-web-api" query={webApiHealth} url={config.cartoWebApiUrl} />
             <ServicePill label="carto-engine" query={cartoHealth} url={config.cartoEngineUrl} />
           </div>
 
@@ -232,7 +312,14 @@ export function App() {
               </label>
             </div>
 
-            <BboxInputs bbox={bbox} onChange={setBbox} />
+            <AoiInputs
+              mode={aoiMode}
+              bbox={bbox}
+              polygon={polygonCoordinates}
+              onModeChange={setAoiMode}
+              onBboxChange={setBbox}
+              onPolygonChange={setPolygonCoordinates}
+            />
 
             <button className="primary-button" type="submit" disabled={searchMutation.isPending}>
               {searchMutation.isPending ? <Loader2 className="spin" size={18} /> : <Search size={18} />}
@@ -333,13 +420,16 @@ export function App() {
         </aside>
 
         <section className="map-stage">
-          <MapPanel bbox={bbox} onBboxChange={setBbox} />
-          <OutputPanel
-            preparedPath={preparedDatasetPath}
-            prepareJob={prepareJob.data}
-            renderJob={renderJob.data}
+          <MapPanel
+            mode={aoiMode}
+            bbox={bbox}
+            polygon={polygonCoordinates}
+            onModeChange={setAoiMode}
+            onBboxChange={setBbox}
+            onPolygonChange={setPolygonCoordinates}
           />
         </section>
+        <ChatPanel context={aiContext} />
       </section>
     </main>
   );
@@ -366,39 +456,138 @@ function ServicePill({
   );
 }
 
-function BboxInputs({ bbox, onChange }: { bbox: Bbox; onChange: (bbox: Bbox) => void }) {
-  const labels = ["xmin", "ymin", "xmax", "ymax"];
+function AoiInputs({
+  mode,
+  bbox,
+  polygon,
+  onModeChange,
+  onBboxChange,
+  onPolygonChange,
+}: {
+  mode: AoiMode;
+  bbox: Bbox;
+  polygon: LngLatPair[];
+  onModeChange: (mode: AoiMode) => void;
+  onBboxChange: (bbox: Bbox) => void;
+  onPolygonChange: (polygon: LngLatPair[]) => void;
+}) {
+  const rectangleLabels = ["西界 xmin", "南界 ymin", "东界 xmax", "北界 ymax"];
   return (
-    <div className="bbox-grid">
-      {bbox.map((value, index) => (
-        <label key={labels[index]}>
-          {labels[index]}
-          <input
-            inputMode="decimal"
-            value={String(value)}
-            onChange={(event) => {
-              const next = [...bbox] as Bbox;
-              next[index] = Number(event.target.value);
-              onChange(normalizeBbox(next));
-            }}
-          />
-        </label>
-      ))}
+    <div className="aoi-control">
+      <div className="segmented-control" aria-label="范围类型">
+        <button
+          className={mode === "rectangle" ? "active" : ""}
+          type="button"
+          onClick={() => onModeChange("rectangle")}
+        >
+          <Square size={15} />
+          矩形
+        </button>
+        <button
+          className={mode === "polygon" ? "active" : ""}
+          type="button"
+          onClick={() => onModeChange("polygon")}
+        >
+          <Pentagon size={15} />
+          多边形
+        </button>
+      </div>
+
+      {mode === "rectangle" ? (
+        <div className="bbox-grid">
+          {bbox.map((value, index) => (
+            <label key={rectangleLabels[index]}>
+              {rectangleLabels[index]}
+              <input
+                inputMode="decimal"
+                value={String(value)}
+                onChange={(event) => {
+                  const next = [...bbox] as Bbox;
+                  next[index] = Number(event.target.value);
+                  onBboxChange(normalizeBbox(next));
+                }}
+              />
+            </label>
+          ))}
+        </div>
+      ) : (
+        <div className="polygon-editor">
+          <div className="polygon-summary">
+            <span>{polygon.length} 个顶点</span>
+            <span>外包矩形 {bboxFromCoordinates(polygon).map(formatCoord).join(", ")}</span>
+          </div>
+          <div className="vertex-list">
+            {polygon.map((coordinate, index) => (
+              <div className="vertex-row" key={index}>
+                <span className="vertex-index">{index + 1}</span>
+                <label>
+                  经度
+                  <input
+                    inputMode="decimal"
+                    value={String(coordinate[0])}
+                    onChange={(event) => {
+                      const next = polygon.map((point) => [...point] as LngLatPair);
+                      next[index][0] = Number(event.target.value);
+                      onPolygonChange(next);
+                    }}
+                  />
+                </label>
+                <label>
+                  纬度
+                  <input
+                    inputMode="decimal"
+                    value={String(coordinate[1])}
+                    onChange={(event) => {
+                      const next = polygon.map((point) => [...point] as LngLatPair);
+                      next[index][1] = Number(event.target.value);
+                      onPolygonChange(next);
+                    }}
+                  />
+                </label>
+                <button
+                  className="mini-icon-button"
+                  type="button"
+                  onClick={() => onPolygonChange(polygon.filter((_, pointIndex) => pointIndex !== index))}
+                  title="删除顶点"
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => onPolygonChange([...polygon, polygon[polygon.length - 1] ?? bboxCenter(bbox)])}
+          >
+            <Plus size={16} />
+            添加顶点
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 function MapPanel({
+  mode,
   bbox,
+  polygon,
+  onModeChange,
   onBboxChange,
+  onPolygonChange,
 }: {
+  mode: AoiMode;
   bbox: Bbox;
+  polygon: LngLatPair[];
+  onModeChange: (mode: AoiMode) => void;
   onBboxChange: (bbox: Bbox) => void;
+  onPolygonChange: (polygon: LngLatPair[]) => void;
 }) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const drawStartRef = useRef<[number, number] | null>(null);
-  const [drawing, setDrawing] = useState(false);
+  const [drawingMode, setDrawingMode] = useState<AoiMode | null>(null);
 
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) {
@@ -431,26 +620,37 @@ function MapPanel({
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.on("load", () => {
-      map.addSource("bbox", {
+      map.addSource("aoi", {
         type: "geojson",
-        data: bboxFeature(bbox),
+        data: aoiFeatureCollection(mode, bbox, polygon),
       });
       map.addLayer({
-        id: "bbox-fill",
+        id: "aoi-fill",
         type: "fill",
-        source: "bbox",
+        source: "aoi",
         paint: {
           "fill-color": "#39a0a8",
           "fill-opacity": 0.16,
         },
       });
       map.addLayer({
-        id: "bbox-line",
+        id: "aoi-line",
         type: "line",
-        source: "bbox",
+        source: "aoi",
         paint: {
           "line-color": "#176b6f",
           "line-width": 2,
+        },
+      });
+      map.addLayer({
+        id: "aoi-vertices",
+        type: "circle",
+        source: "aoi",
+        paint: {
+          "circle-color": "#176b6f",
+          "circle-radius": 4,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1.5,
         },
       });
     });
@@ -467,9 +667,9 @@ function MapPanel({
     if (!map || !map.isStyleLoaded()) {
       return;
     }
-    const source = map.getSource("bbox") as GeoJSONSource | undefined;
-    source?.setData(bboxFeature(bbox));
-  }, [bbox]);
+    const source = map.getSource("aoi") as GeoJSONSource | undefined;
+    source?.setData(aoiFeatureCollection(mode, bbox, polygon));
+  }, [bbox, mode, polygon]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -477,8 +677,8 @@ function MapPanel({
       return;
     }
 
-    map.getCanvas().style.cursor = drawing ? "crosshair" : "";
-    if (drawing) {
+    map.getCanvas().style.cursor = drawingMode ? "crosshair" : "";
+    if (drawingMode) {
       map.dragPan.disable();
     } else {
       map.dragPan.enable();
@@ -486,55 +686,113 @@ function MapPanel({
     }
 
     const onMouseDown = (event: maplibregl.MapMouseEvent) => {
-      if (!drawing) {
+      if (drawingMode !== "rectangle") {
         return;
       }
       drawStartRef.current = [event.lngLat.lng, event.lngLat.lat];
     };
     const onMouseMove = (event: maplibregl.MapMouseEvent) => {
       const start = drawStartRef.current;
-      if (!drawing || !start) {
+      if (drawingMode !== "rectangle" || !start) {
         return;
       }
       onBboxChange(normalizeBbox([start[0], start[1], event.lngLat.lng, event.lngLat.lat]));
     };
     const onMouseUp = (event: maplibregl.MapMouseEvent) => {
       const start = drawStartRef.current;
-      if (!drawing || !start) {
+      if (drawingMode !== "rectangle" || !start) {
         return;
       }
       onBboxChange(normalizeBbox([start[0], start[1], event.lngLat.lng, event.lngLat.lat]));
       drawStartRef.current = null;
-      setDrawing(false);
+      setDrawingMode(null);
+    };
+    const onClick = (event: maplibregl.MapMouseEvent) => {
+      if (drawingMode !== "polygon") {
+        return;
+      }
+      onPolygonChange([...polygon, [event.lngLat.lng, event.lngLat.lat]]);
     };
 
     map.on("mousedown", onMouseDown);
     map.on("mousemove", onMouseMove);
     map.on("mouseup", onMouseUp);
+    map.on("click", onClick);
     return () => {
       map.off("mousedown", onMouseDown);
       map.off("mousemove", onMouseMove);
       map.off("mouseup", onMouseUp);
+      map.off("click", onClick);
     };
-  }, [drawing, onBboxChange]);
+  }, [drawingMode, onBboxChange, onPolygonChange, polygon]);
+
+  const currentBounds = mode === "polygon" && polygon.length >= 3 ? bboxFromCoordinates(polygon) : bbox;
 
   return (
     <div className="map-panel">
       <div ref={mapContainerRef} className="map-container" />
       <div className="map-tools">
         <button
-          className={`tool-button ${drawing ? "active" : ""}`}
+          className={`tool-button ${mode === "rectangle" ? "active" : ""}`}
           type="button"
-          onClick={() => setDrawing((value) => !value)}
-          title="绘制 bbox"
+          onClick={() => {
+            onModeChange("rectangle");
+            setDrawingMode((value) => (value === "rectangle" ? null : "rectangle"));
+          }}
+          title="绘制矩形范围"
         >
-          <Crosshair size={18} />
-          <span>绘制范围</span>
+          <Square size={17} />
+          <span>矩形</span>
+        </button>
+        <button
+          className={`tool-button ${mode === "polygon" ? "active" : ""}`}
+          type="button"
+          onClick={() => {
+            onModeChange("polygon");
+            onPolygonChange([]);
+            setDrawingMode("polygon");
+          }}
+          title="绘制多边形范围"
+        >
+          <Pentagon size={17} />
+          <span>多边形</span>
+        </button>
+        {drawingMode === "polygon" ? (
+          <button
+            className="tool-button"
+            type="button"
+            disabled={polygon.length < 3}
+            onClick={() => setDrawingMode(null)}
+            title="完成多边形"
+          >
+            <CheckCircle2 size={17} />
+            <span>完成</span>
+          </button>
+        ) : null}
+        {mode === "polygon" && polygon.length ? (
+          <button
+            className="tool-button"
+            type="button"
+            onClick={() => onPolygonChange([])}
+            title="清除多边形"
+          >
+            <Trash2 size={17} />
+            <span>清除</span>
+          </button>
+        ) : null}
+        <button
+          className="tool-button"
+          type="button"
+          onClick={() => setDrawingMode(null)}
+          title="停止绘制"
+        >
+          <Crosshair size={17} />
+          <span>停止</span>
         </button>
         <button
           className="tool-button"
           type="button"
-          onClick={() => mapRef.current?.fitBounds(bbox, { padding: 80, duration: 500 })}
+          onClick={() => mapRef.current?.fitBounds(currentBounds, { padding: 80, duration: 500 })}
           title="定位范围"
         >
           <Play size={17} />
@@ -545,35 +803,103 @@ function MapPanel({
   );
 }
 
-function OutputPanel({
-  preparedPath,
-  prepareJob,
-  renderJob,
-}: {
-  preparedPath?: string;
-  prepareJob?: JobRecord;
-  renderJob?: JobRecord;
-}) {
-  const previewPath = extractPreviewPath(renderJob);
+function ChatPanel({ context }: { context: string }) {
+  const [draft, setDraft] = useState("");
+  const [messages, setMessages] = useState<AiChatMessage[]>([
+    {
+      role: "assistant",
+      content: "你好，我是 gyygeo AI 助手。可以帮你选数据、解释参数、规划制图流程或排查服务状态。",
+    },
+  ]);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+
+  const chatMutation = useMutation({
+    mutationFn: (nextMessages: AiChatMessage[]) =>
+      sendAiChat({
+        messages: nextMessages,
+        context,
+      }),
+    onSuccess: (response) => {
+      setMessages((current) => [...current, response.message]);
+    },
+  });
+
+  useEffect(() => {
+    messageListRef.current?.scrollTo({
+      top: messageListRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages, chatMutation.isPending]);
+
+  const submitMessage = () => {
+    const content = draft.trim();
+    if (!content || chatMutation.isPending) {
+      return;
+    }
+    const nextMessages: AiChatMessage[] = [...messages, { role: "user", content }];
+    setMessages(nextMessages);
+    setDraft("");
+    chatMutation.mutate(nextMessages);
+  };
+
   return (
-    <section className="output-panel">
-      <div>
-        <p className="eyebrow">Pipeline</p>
-        <h2>输出</h2>
+    <aside className="ai-panel">
+      <header className="ai-header">
+        <div className="ai-title">
+          <Bot size={18} />
+          <div>
+            <p className="eyebrow">DeepSeek</p>
+            <h2>AI 对话</h2>
+          </div>
+        </div>
+        <span className="model-pill">
+          <Sparkles size={14} />
+          deepseek-v4-flash
+        </span>
+      </header>
+
+      <div className="chat-list" ref={messageListRef}>
+        {messages.map((message, index) => (
+          <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}>
+            <div className="chat-bubble">{message.content}</div>
+          </div>
+        ))}
+        {chatMutation.isPending ? (
+          <div className="chat-message assistant">
+            <div className="chat-bubble pending">
+              <Loader2 className="spin" size={15} />
+              正在生成回复
+            </div>
+          </div>
+        ) : null}
       </div>
-      <dl className="output-list">
-        <div>
-          <dt>Prepared dataset</dt>
-          <dd>{preparedPath || statusText(prepareJob?.status)}</dd>
-        </div>
-        <div>
-          <dt>Preview</dt>
-          <dd>{previewPath || statusText(renderJob?.status)}</dd>
-        </div>
-      </dl>
-      {renderJob?.status === "failed" ? <ErrorText error={renderJob.error ?? "Render failed"} /> : null}
-      {prepareJob?.status === "failed" ? <ErrorText error={prepareJob.error ?? "Prepare failed"} /> : null}
-    </section>
+
+      {chatMutation.error ? <ErrorText error={chatMutation.error} /> : null}
+
+      <form
+        className="chat-composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submitMessage();
+        }}
+      >
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submitMessage();
+            }
+          }}
+          placeholder="问问当前地图、数据或制图流程"
+          rows={3}
+        />
+        <button className="send-button" type="submit" disabled={!draft.trim() || chatMutation.isPending}>
+          {chatMutation.isPending ? <Loader2 className="spin" size={17} /> : <SendHorizontal size={17} />}
+        </button>
+      </form>
+    </aside>
   );
 }
 
@@ -607,6 +933,90 @@ function normalizeBbox(values: Bbox): Bbox {
   return [Math.min(a, c), Math.min(b, d), Math.max(a, c), Math.max(b, d)];
 }
 
+function bboxFromCoordinates(coordinates: LngLatPair[]): Bbox {
+  const finite = coordinates.filter(
+    ([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat),
+  );
+  if (!finite.length) {
+    return [0, 0, 0, 0];
+  }
+  const lngs = finite.map(([lng]) => lng);
+  const lats = finite.map(([, lat]) => lat);
+  return [
+    Math.min(...lngs),
+    Math.min(...lats),
+    Math.max(...lngs),
+    Math.max(...lats),
+  ];
+}
+
+function bboxCenter(bbox: Bbox): LngLatPair {
+  return [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+}
+
+function polygonGeometry(coordinates: LngLatPair[]): PolygonGeometry | undefined {
+  const finite = coordinates.filter(
+    ([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat),
+  );
+  if (finite.length < 3) {
+    return undefined;
+  }
+  const ring = finite.map(([lng, lat]) => [lng, lat] as LngLatPair);
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (first[0] !== last[0] || first[1] !== last[1]) {
+    ring.push([first[0], first[1]]);
+  }
+  return {
+    type: "Polygon",
+    coordinates: [ring],
+  };
+}
+
+function aoiFeatureCollection(
+  mode: AoiMode,
+  bbox: Bbox,
+  polygon: LngLatPair[],
+): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  if (mode === "rectangle") {
+    features.push(bboxFeature(bbox));
+  } else {
+    const geometry = polygonGeometry(polygon);
+    if (geometry) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry,
+      });
+    } else if (polygon.length >= 2) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "LineString",
+          coordinates: polygon,
+        },
+      });
+    }
+    if (polygon.length) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "MultiPoint",
+          coordinates: polygon,
+        },
+      });
+    }
+  }
+
+  return {
+    type: "FeatureCollection",
+    features,
+  };
+}
+
 function bboxFeature(bbox: Bbox): GeoJSON.Feature<GeoJSON.Polygon> {
   const [xmin, ymin, xmax, ymax] = bbox;
   return {
@@ -625,6 +1035,10 @@ function bboxFeature(bbox: Bbox): GeoJSON.Feature<GeoJSON.Polygon> {
       ],
     },
   };
+}
+
+function formatCoord(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(5) : "-";
 }
 
 function optionalNumber(value: string): number | undefined {
@@ -668,13 +1082,6 @@ function formatItemMeta(item: SearchItem): string {
     item.assets?.length ? `${item.assets.length} assets` : "",
   ].filter(Boolean);
   return pieces.join(" | ") || item.collection;
-}
-
-function statusText(status?: JobStatus): string {
-  if (!status) {
-    return "-";
-  }
-  return status;
 }
 
 function statusIcon(status: JobStatus) {

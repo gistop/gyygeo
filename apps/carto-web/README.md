@@ -14,6 +14,7 @@ This app lets a browser call `data-service` and `carto-engine` through HTTP APIs
 ## Runtime
 
 - Node.js 20 or newer
+- `apps/carto-web-api` running at `http://127.0.0.1:8020`
 - `apps/data-service` running at `http://127.0.0.1:8010`
 - `apps/carto-engine` running at `http://127.0.0.1:8000`
 
@@ -23,8 +24,12 @@ Copy `.env.example` to `.env` if local service URLs differ:
 
 ```text
 VITE_DATA_SERVICE_URL=http://127.0.0.1:8010
+VITE_CARTO_WEB_API_URL=http://127.0.0.1:8020
 VITE_CARTO_ENGINE_URL=http://127.0.0.1:8000
 ```
+
+The right-side AI chat panel calls `carto-web-api` at `/api/v1/ai/chat`, which proxies to
+DeepSeek with `deepseek-v4-flash`.
 
 ## Development Start
 
