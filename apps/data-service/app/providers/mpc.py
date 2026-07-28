@@ -19,6 +19,12 @@ _MPC_COLLECTION_HINTS = {
     "landsat-c2-l2": "Landsat Collection 2 Level-2",
     "sentinel-2-l2a": "Sentinel-2 Level-2A",
 }
+_MPC_TILEJSON_URL = "https://planetarycomputer.microsoft.com/api/data/v1/item/tilejson.json"
+_WEB_MERCATOR_HALF_WORLD = 20037508.342789244
+_WEB_MERCATOR_INITIAL_RESOLUTION = 156543.03392804097
+_WEB_MERCATOR_MAX_LAT = 85.05112878
+_TILE_SIZE = 256
+_MAX_TILE_FALLBACK_TILES = 256
 
 
 class MpcProvider:
@@ -120,16 +126,27 @@ class MpcProvider:
         target_crs = CRS.from_string(request.target_crs) if request.target_crs else None
         bbox_crs = CRS.from_string(request.bbox_crs)
         read_bounds = _geometry_bounds(request.geometry) if request.geometry else tuple(request.bbox)
+        if request.metadata.get("prepare_strategy") == "mpc_dynamic_tiles":
+            return self._prepare_raster_from_mpc_tiles(
+                request=request,
+                output_path=output_path,
+                item=item,
+                read_bounds=read_bounds,
+                open_error=RuntimeError("MPC dynamic tile strategy requested."),
+            )
         sources = []
         try:
             for href in hrefs:
                 try:
                     src = rasterio.open(href)
                 except Exception as exc:  # noqa: BLE001
-                    raise RuntimeError(
-                        "GDAL/rasterio could not open the signed MPC COG asset. "
-                        "Verify that the running environment supports remote HTTPS COG reads."
-                    ) from exc
+                    return self._prepare_raster_from_mpc_tiles(
+                        request=request,
+                        output_path=output_path,
+                        item=item,
+                        read_bounds=read_bounds,
+                        open_error=exc,
+                    )
                 dst_crs = target_crs or src.crs
                 target_bounds = transform_bounds(bbox_crs, dst_crs, *read_bounds, densify_pts=21)
                 target_geometry = (
@@ -255,6 +272,159 @@ class MpcProvider:
             for src, vrt, _data, _transform in sources:
                 vrt.close()
                 src.close()
+
+    def _prepare_raster_from_mpc_tiles(
+        self,
+        *,
+        request: PrepareRasterRequest,
+        output_path: Path,
+        item: Any,
+        read_bounds: tuple[float, float, float, float],
+        open_error: Exception,
+    ) -> PreparedRaster:
+        """Fallback that uses MPC dynamic tiles instead of downloading full COG assets."""
+
+        import numpy as np  # type: ignore
+        import requests
+        import rasterio  # type: ignore
+        from rasterio.crs import CRS  # type: ignore
+        from rasterio.io import MemoryFile  # type: ignore
+        from rasterio.warp import transform_bounds  # type: ignore
+
+        target_crs = CRS.from_string(request.target_crs) if request.target_crs else CRS.from_epsg(3857)
+        if target_crs.to_epsg() != 3857:
+            raise RuntimeError(
+                "GDAL/rasterio could not open the signed MPC COG asset, and the tile fallback "
+                "currently supports only EPSG:3857 output. Set target_crs to EPSG:3857."
+            ) from open_error
+
+        bbox_crs = CRS.from_string(request.bbox_crs)
+        lonlat_bounds = transform_bounds(bbox_crs, CRS.from_epsg(4326), *read_bounds, densify_pts=21)
+        lonlat_bounds = _clamp_lonlat_bounds(lonlat_bounds)
+        zoom = _choose_tile_zoom(lonlat_bounds, request.target_resolution)
+
+        tilejson = self._fetch_tilejson(request.collection, request.item_id, request.bands)
+        minzoom = int(tilejson.get("minzoom", 0))
+        maxzoom = int(tilejson.get("maxzoom", 24))
+        zoom = min(maxzoom, max(minzoom, zoom))
+        tile_template = (tilejson.get("tiles") or [None])[0]
+        if not isinstance(tile_template, str) or not tile_template:
+            raise RuntimeError("MPC tilejson response did not include a tile URL template.")
+
+        tile_range = _tile_range_for_bounds(lonlat_bounds, zoom)
+        while _tile_count(tile_range) > _MAX_TILE_FALLBACK_TILES and zoom > minzoom:
+            zoom -= 1
+            tile_range = _tile_range_for_bounds(lonlat_bounds, zoom)
+
+        tile_count = _tile_count(tile_range)
+        if tile_count > _MAX_TILE_FALLBACK_TILES:
+            raise RuntimeError(
+                "MPC tile fallback would require too many tiles for this AOI. "
+                "Use a smaller AOI or a coarser target_resolution."
+            )
+
+        x_min, y_min, x_max, y_max = tile_range
+        cols = x_max - x_min + 1
+        rows = y_max - y_min + 1
+        mosaic = np.zeros((3, rows * _TILE_SIZE, cols * _TILE_SIZE), dtype=np.uint8)
+
+        for y in range(y_min, y_max + 1):
+            for x in range(x_min, x_max + 1):
+                tile_url = (
+                    tile_template
+                    .replace("{z}", str(zoom))
+                    .replace("{x}", str(x))
+                    .replace("{y}", str(y))
+                )
+                response = requests.get(tile_url, timeout=60)
+                response.raise_for_status()
+                with MemoryFile(response.content) as memory_file:
+                    with memory_file.open() as tile_dataset:
+                        tile_data = tile_dataset.read()
+                if tile_data.shape[0] >= 3:
+                    rgb = tile_data[:3]
+                else:
+                    rgb = np.repeat(tile_data[:1], 3, axis=0)
+                row_offset = (y - y_min) * _TILE_SIZE
+                col_offset = (x - x_min) * _TILE_SIZE
+                mosaic[
+                    :,
+                    row_offset : row_offset + _TILE_SIZE,
+                    col_offset : col_offset + _TILE_SIZE,
+                ] = rgb
+
+        left, top = _tile_upper_left_meters(x_min, y_min, zoom)
+        resolution = _tile_resolution(zoom)
+        transform = from_origin(left, top, resolution, resolution)
+        bounds = (
+            left,
+            top - mosaic.shape[1] * resolution,
+            left + mosaic.shape[2] * resolution,
+            top,
+        )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        profile = {
+            "driver": "GTiff",
+            "height": mosaic.shape[1],
+            "width": mosaic.shape[2],
+            "count": 3,
+            "dtype": mosaic.dtype,
+            "crs": target_crs,
+            "transform": transform,
+            "nodata": 0,
+            "photometric": "RGB",
+        }
+        with rasterio.open(output_path, "w", **profile) as dst:
+            dst.write(mosaic)
+            for index, band in enumerate(["red", "green", "blue"], start=1):
+                dst.set_band_description(index, band)
+            dst.update_tags(
+                provider=self.provider_id,
+                collection=request.collection,
+                item_id=request.item_id,
+                source="microsoft-planetary-computer-dynamic-tiles",
+            )
+
+        return PreparedRaster(
+            path=output_path,
+            bbox=[bounds[0], bounds[1], bounds[2], bounds[3]],
+            crs=target_crs.to_string(),
+            resolution=float(resolution),
+            bands=["red", "green", "blue"],
+            metadata={
+                "provider": self.provider_id,
+                "collection": request.collection,
+                "item_id": request.item_id,
+                "asset_count": len(request.bands),
+                "bbox_crs": request.bbox_crs,
+                "aoi_type": "polygon" if request.geometry else "bbox",
+                "geometry": request.geometry,
+                "fallback": "mpc_dynamic_tiles",
+                "tile_zoom": zoom,
+                "tile_count": tile_count,
+                "remote_cog_error": str(open_error),
+            },
+        )
+
+    def _fetch_tilejson(self, collection: str, item_id: str, bands: List[str]) -> Dict[str, Any]:
+        import requests
+
+        params: list[tuple[str, str]] = [
+            ("collection", collection),
+            ("item", item_id),
+            ("format", "png"),
+            ("color_formula", "gamma RGB 2.7, saturation 1.5, sigmoidal RGB 15 0.55"),
+        ]
+        if bands == ["visual"]:
+            params.extend([("assets", "visual"), ("asset_bidx", "visual|1,2,3")])
+        else:
+            for band in bands[:3]:
+                params.append(("assets", band))
+
+        response = requests.get(_MPC_TILEJSON_URL, params=params, timeout=60)
+        response.raise_for_status()
+        return response.json()
 
     def download_assets(self, request: DownloadAssetsRequest, output_dir: Path) -> DownloadedAssets:
         self._ensure_search_dependencies()
@@ -396,6 +566,75 @@ def _safe_to_dict(value: Any) -> Dict[str, object]:
 def _target_transform(bounds: tuple[float, float, float, float], resolution: float) -> Any:
     left, _bottom, _right, top = bounds
     return from_origin(left, top, resolution, resolution)
+
+
+def _clamp_lonlat_bounds(bounds: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    min_lon, min_lat, max_lon, max_lat = bounds
+    return (
+        max(-180.0, min(180.0, min_lon)),
+        max(-_WEB_MERCATOR_MAX_LAT, min(_WEB_MERCATOR_MAX_LAT, min_lat)),
+        max(-180.0, min(180.0, max_lon)),
+        max(-_WEB_MERCATOR_MAX_LAT, min(_WEB_MERCATOR_MAX_LAT, max_lat)),
+    )
+
+
+def _choose_tile_zoom(
+    lonlat_bounds: tuple[float, float, float, float],
+    target_resolution: Optional[float],
+) -> int:
+    if target_resolution is not None and target_resolution > 0:
+        return max(0, min(24, math.ceil(math.log2(_WEB_MERCATOR_INITIAL_RESOLUTION / target_resolution))))
+
+    min_lon, min_lat, max_lon, max_lat = lonlat_bounds
+    span = max(abs(max_lon - min_lon), abs(max_lat - min_lat))
+    if span <= 0.05:
+        return 13
+    if span <= 0.2:
+        return 11
+    if span <= 1:
+        return 9
+    return 7
+
+
+def _tile_range_for_bounds(
+    lonlat_bounds: tuple[float, float, float, float],
+    zoom: int,
+) -> tuple[int, int, int, int]:
+    min_lon, min_lat, max_lon, max_lat = lonlat_bounds
+    x_min, y_max = _lonlat_to_tile(min_lon, min_lat, zoom)
+    x_max, y_min = _lonlat_to_tile(max_lon, max_lat, zoom)
+    max_index = (2**zoom) - 1
+    return (
+        max(0, min(max_index, min(x_min, x_max))),
+        max(0, min(max_index, min(y_min, y_max))),
+        max(0, min(max_index, max(x_min, x_max))),
+        max(0, min(max_index, max(y_min, y_max))),
+    )
+
+
+def _lonlat_to_tile(lon: float, lat: float, zoom: int) -> tuple[int, int]:
+    lat = max(-_WEB_MERCATOR_MAX_LAT, min(_WEB_MERCATOR_MAX_LAT, lat))
+    n = 2**zoom
+    x = int((lon + 180.0) / 360.0 * n)
+    lat_rad = math.radians(lat)
+    y = int((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
+    return x, y
+
+
+def _tile_count(tile_range: tuple[int, int, int, int]) -> int:
+    x_min, y_min, x_max, y_max = tile_range
+    return (x_max - x_min + 1) * (y_max - y_min + 1)
+
+
+def _tile_resolution(zoom: int) -> float:
+    return _WEB_MERCATOR_INITIAL_RESOLUTION / (2**zoom)
+
+
+def _tile_upper_left_meters(x: int, y: int, zoom: int) -> tuple[float, float]:
+    tile_size_meters = (_WEB_MERCATOR_HALF_WORLD * 2.0) / (2**zoom)
+    left = -_WEB_MERCATOR_HALF_WORLD + x * tile_size_meters
+    top = _WEB_MERCATOR_HALF_WORLD - y * tile_size_meters
+    return left, top
 
 
 def _geometry_bounds(geometry: Dict[str, Any]) -> tuple[float, float, float, float]:

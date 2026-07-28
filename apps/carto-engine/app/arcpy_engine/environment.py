@@ -15,7 +15,7 @@ def probe_arcpy(python_exe: Path, working_dir: Path, timeout_seconds: int = 30) 
     )
     try:
         completed = subprocess.run(
-            [str(python_exe), "-c", code],
+            [str(python_exe), "-u", "-X", "faulthandler", "-c", code],
             cwd=str(working_dir),
             capture_output=True,
             text=True,
@@ -28,6 +28,7 @@ def probe_arcpy(python_exe: Path, working_dir: Path, timeout_seconds: int = 30) 
                 "available": False,
                 "python": str(python_exe),
                 "return_code": completed.returncode,
+                "diagnosis": _diagnose_return_code(completed.returncode),
                 "stdout": completed.stdout.strip(),
                 "stderr": completed.stderr.strip(),
             }
@@ -50,3 +51,10 @@ def probe_arcpy(python_exe: Path, working_dir: Path, timeout_seconds: int = 30) 
             "python": str(python_exe),
             "error": str(exc),
         }
+
+
+def _diagnose_return_code(return_code: int) -> str | None:
+    # Windows reports STATUS_ACCESS_VIOLATION as either signed or unsigned.
+    if return_code in {-1073741819, 3221225477}:
+        return "ArcPy crashed with Windows access violation 0xC0000005 during import."
+    return None

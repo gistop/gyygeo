@@ -15,6 +15,7 @@ dist/
 # Local environment
 .env
 .run/
+apps/carto-web-api/data/agent/*
 
 # Engine runtime data
 apps/carto-engine/data/*

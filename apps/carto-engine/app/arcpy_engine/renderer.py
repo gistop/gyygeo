@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from app.core.config import Settings
 from app.core.models import model_to_dict
+from app.arcpy_engine.environment import probe_arcpy
 from app.schemas.project import RenderPreviewRequest
 
 
@@ -41,6 +42,13 @@ class ArcPyRenderer:
                 "GYYGEO_CARTO_ARCPY_MODE must be 'required' or 'auto' for real rendering."
             )
 
+        arcpy_probe = probe_arcpy(self.settings.python_exe, self.settings.base_dir)
+        if not arcpy_probe.get("available"):
+            raise RuntimeError(
+                "ArcPy runtime is unavailable. "
+                f"Probe result: {json.dumps(arcpy_probe, ensure_ascii=False)}"
+            )
+
         return self._render_with_worker(
             job_id=job_id,
             request=request,
@@ -59,6 +67,9 @@ class ArcPyRenderer:
         result_path = output_dir / "result.json"
         command = [
             str(self.settings.python_exe),
+            "-u",
+            "-X",
+            "faulthandler",
             "-m",
             "app.arcpy_engine.worker",
             "--job-id",

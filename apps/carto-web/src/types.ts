@@ -123,3 +123,58 @@ export interface AiChatResponse {
   message: AiChatMessage;
   model: string;
 }
+
+export interface AgentPageContext {
+  provider: string;
+  collection: string;
+  datetime?: string;
+  cloud_cover_lte?: number;
+  limit: number;
+  aoi_mode: AoiMode;
+  bbox: Bbox;
+  geometry?: PolygonGeometry;
+  bands: string[];
+  target_resolution?: number;
+  target_crs?: string;
+  map_title?: string;
+  layout_name?: string;
+}
+
+export type AgentTaskStatus = "queued" | "running" | "waiting_for_user" | "done" | "failed";
+export type AgentStepStatus = "pending" | "running" | "done" | "failed";
+
+export interface AgentStep {
+  name: string;
+  status: AgentStepStatus;
+  summary: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface AgentTask {
+  id: string;
+  kind: string;
+  status: AgentTaskStatus;
+  created_at: string;
+  updated_at: string;
+  message: string;
+  map_spec: Record<string, unknown>;
+  steps: AgentStep[];
+  outputs: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface AgentChatPayload {
+  messages: AiChatMessage[];
+  context?: AgentPageContext;
+}
+
+export interface AgentChatResponse {
+  message: AiChatMessage;
+  model: string;
+  task?: AgentTask | null;
+  requires_confirmation: boolean;
+}

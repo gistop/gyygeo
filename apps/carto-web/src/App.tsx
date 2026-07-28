@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import {
   config,
+  getAgentTask,
   getCartoHealth,
   getCartoWebApiHealth,
   getCartoJob,
@@ -28,10 +29,12 @@ import {
   getDataJob,
   prepareRaster,
   renderPreview,
-  sendAiChat,
+  sendAgentChat,
   searchItems,
 } from "./api";
 import type {
+  AgentPageContext,
+  AgentTask,
   AiChatMessage,
   AoiMode,
   Bbox,
@@ -210,37 +213,37 @@ export function App() {
   const canRender =
     dryRun ||
     (prepareJob.data?.status === "done" && Boolean(preparedDatasetPath) && !renderMutation.isPending);
-  const aiContext = useMemo(() => {
-    return [
-      `Provider: ${provider}`,
-      `Collection: ${collection}`,
-      `Datetime: ${datetime}`,
-      `AOI type: ${aoiMode}`,
-      `BBOX: ${activeBbox.join(", ")}`,
-      `Polygon vertices: ${aoiMode === "polygon" ? polygonCoordinates.length : "-"}`,
-      `Bands: ${bands}`,
-      `Target CRS: ${targetCrs}`,
-      `Selected item: ${selectedItem?.item_id ?? "-"}`,
-      `Prepare job: ${prepareJob.data?.status ?? "-"}`,
-      `Prepared dataset: ${preparedDatasetPath ?? "-"}`,
-      `Render job: ${renderJob.data?.status ?? "-"}`,
-      `Preview: ${extractPreviewPath(renderJob.data) ?? "-"}`,
-    ].join("\n");
+  const agentContext = useMemo<AgentPageContext>(() => {
+    return {
+      provider,
+      collection,
+      datetime: datetime.trim() || undefined,
+      cloud_cover_lte: optionalNumber(cloudCover),
+      limit: clampInt(limit, 1, 100, 10),
+      aoi_mode: aoiMode,
+      bbox: activeBbox,
+      geometry: activeGeometry,
+      bands: splitCsv(bands),
+      target_resolution: optionalNumber(targetResolution),
+      target_crs: targetCrs.trim() || undefined,
+      map_title: mapTitle.trim() || undefined,
+      layout_name: layoutName.trim() || undefined,
+    };
   }, [
     activeBbox,
+    activeGeometry,
     aoiMode,
     bands,
+    cloudCover,
     collection,
     datetime,
-    polygonCoordinates,
-    preparedDatasetPath,
-    prepareJob.data,
+    layoutName,
+    limit,
+    mapTitle,
     provider,
-    renderJob.data,
-    selectedItem,
     targetCrs,
+    targetResolution,
   ]);
-
   return (
     <main className="shell">
       <section className="workspace">
@@ -429,7 +432,7 @@ export function App() {
             onPolygonChange={setPolygonCoordinates}
           />
         </section>
-        <ChatPanel context={aiContext} />
+      <ChatPanel context={agentContext} />
       </section>
     </main>
   );
@@ -803,8 +806,10 @@ function MapPanel({
   );
 }
 
-function ChatPanel({ context }: { context: string }) {
+function ChatPanel({ context }: { context: AgentPageContext }) {
   const [draft, setDraft] = useState("");
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [reportedTaskId, setReportedTaskId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AiChatMessage[]>([
     {
       role: "assistant",
@@ -815,12 +820,26 @@ function ChatPanel({ context }: { context: string }) {
 
   const chatMutation = useMutation({
     mutationFn: (nextMessages: AiChatMessage[]) =>
-      sendAiChat({
+      sendAgentChat({
         messages: nextMessages,
         context,
       }),
     onSuccess: (response) => {
       setMessages((current) => [...current, response.message]);
+      if (response.task?.id) {
+        setActiveTaskId(response.task.id);
+        setReportedTaskId(null);
+      }
+    },
+  });
+
+  const activeTask = useQuery({
+    queryKey: ["agent-task", activeTaskId],
+    queryFn: () => getAgentTask(activeTaskId!),
+    enabled: Boolean(activeTaskId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "done" || status === "failed" ? false : 2000;
     },
   });
 
@@ -829,7 +848,22 @@ function ChatPanel({ context }: { context: string }) {
       top: messageListRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages, chatMutation.isPending]);
+  }, [messages, chatMutation.isPending, activeTask.data]);
+
+  useEffect(() => {
+    const task = activeTask.data;
+    if (!task || reportedTaskId === task.id || (task.status !== "done" && task.status !== "failed")) {
+      return;
+    }
+    setReportedTaskId(task.id);
+    setMessages((current) => [
+      ...current,
+      {
+        role: "assistant",
+        content: formatAgentTaskResult(task),
+      },
+    ]);
+  }, [activeTask.data, reportedTaskId]);
 
   const submitMessage = () => {
     const content = draft.trim();
@@ -848,13 +882,13 @@ function ChatPanel({ context }: { context: string }) {
         <div className="ai-title">
           <Bot size={18} />
           <div>
-            <p className="eyebrow">DeepSeek</p>
+            <p className="eyebrow">Map Agent</p>
             <h2>AI 对话</h2>
           </div>
         </div>
         <span className="model-pill">
           <Sparkles size={14} />
-          deepseek-v4-flash
+          gyygeo-agent
         </span>
       </header>
 
@@ -869,6 +903,14 @@ function ChatPanel({ context }: { context: string }) {
             <div className="chat-bubble pending">
               <Loader2 className="spin" size={15} />
               正在生成回复
+            </div>
+          </div>
+        ) : null}
+        {activeTask.data && activeTask.data.status !== "done" && activeTask.data.status !== "failed" ? (
+          <div className="chat-message assistant">
+            <div className="chat-bubble pending">
+              <Loader2 className="spin" size={15} />
+              {formatAgentTaskProgress(activeTask.data)}
             </div>
           </div>
         ) : null}
@@ -901,6 +943,26 @@ function ChatPanel({ context }: { context: string }) {
       </form>
     </aside>
   );
+}
+
+function formatAgentTaskProgress(task: AgentTask): string {
+  const runningStep = task.steps.find((step) => step.status === "running");
+  const doneCount = task.steps.filter((step) => step.status === "done").length;
+  const total = task.steps.length;
+  return `Agent task ${task.id}: ${task.status}. ${doneCount}/${total} steps done${
+    runningStep ? `, running ${runningStep.name}` : ""
+  }.`;
+}
+
+function formatAgentTaskResult(task: AgentTask): string {
+  if (task.status === "failed") {
+    return `Agent task ${task.id} failed: ${task.error ?? task.message}`;
+  }
+  const render = task.outputs?.render as { files?: { preview?: unknown } } | undefined;
+  const preview = typeof render?.files?.preview === "string" ? render.files.preview : "-";
+  const qa = task.outputs?.qa as { summary?: unknown } | undefined;
+  const qaSummary = typeof qa?.summary === "string" ? qa.summary : "QA finished.";
+  return `Agent task ${task.id} completed.\nOutput: ${preview}\n${qaSummary}`;
 }
 
 function JobLine({
