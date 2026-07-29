@@ -8,7 +8,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from app.core.config import get_settings
-from app.schemas.project import LayoutText, RenderPreviewRequest
+from app.schemas.project import LayoutElementPosition, LayoutText, RenderPreviewRequest
+
+_LAYOUT_ELEMENT_TYPES = (
+    "GRAPHIC_ELEMENT",
+    "GROUP_ELEMENT",
+    "LEGEND_ELEMENT",
+    "MAPFRAME_ELEMENT",
+    "MAPSURROUND_ELEMENT",
+    "PICTURE_ELEMENT",
+    "TABLEFRAME_ELEMENT",
+    "TEXT_ELEMENT",
+)
 
 
 def main() -> int:
@@ -67,6 +78,7 @@ def render_with_arcpy(
 
         _apply_title(layout, request.project.title)
         _apply_layout_text(layout, request.project.layout_text)
+        messages.extend(_apply_layout_element_positions(layout, request.project.layout_elements))
         _apply_extent(arcpy, layout, map_obj, request)
 
         aprx.save()
@@ -135,6 +147,129 @@ def _apply_layout_text(layout: Any, layout_text: list[LayoutText]) -> None:
         element = elements.get(item.element_name)
         if element is not None:
             element.text = item.text
+
+
+def _apply_layout_element_positions(
+    layout: Any,
+    positions: list[LayoutElementPosition],
+) -> list[str]:
+    messages = []
+    if not positions:
+        return messages
+
+    for item in positions:
+        element = _find_layout_element(layout, item.element_name)
+        x, y = _layout_element_xy(layout, element, item)
+        _set_layout_element_bottom_left_anchor(element)
+        element.elementPositionX = x
+        element.elementPositionY = y
+        messages.append(f"Moved layout element {item.element_name} to {x:.3f}, {y:.3f}")
+
+    return messages
+
+
+def _find_layout_element(layout: Any, element_name: str) -> Any:
+    candidates = _layout_elements(layout)
+    for _, element in candidates:
+        if getattr(element, "name", "") == element_name:
+            return element
+    for _, element in candidates:
+        if _normalized_layout_name(getattr(element, "name", "")) == _normalized_layout_name(
+            element_name
+        ):
+            return element
+
+    available = [
+        (element_type, getattr(element, "name", ""))
+        for element_type, element in candidates
+        if getattr(element, "name", "")
+    ]
+    if not available:
+        available = _layout_element_names_from_parent(layout)
+    available_text = ", ".join(f"{element_type}:{name}" for element_type, name in available)
+    detail = f" Available layout elements: {available_text}" if available_text else ""
+    raise RuntimeError(f"Layout element not found: {element_name}.{detail}")
+
+
+def _layout_elements(parent: Any) -> list[tuple[str, Any]]:
+    candidates = []
+    for element_type in _LAYOUT_ELEMENT_TYPES:
+        try:
+            elements = parent.listElements(element_type)
+        except (TypeError, ValueError):
+            continue
+        for element in elements:
+            candidates.append((element_type, element))
+            if element_type == "GROUP_ELEMENT" and hasattr(element, "listElements"):
+                candidates.extend(_layout_elements(element))
+    return candidates
+
+
+def _layout_element_names_from_parent(parent: Any) -> list[tuple[str, str]]:
+    return [
+        (element_type, getattr(element, "name", ""))
+        for element_type, element in _layout_elements(parent)
+        if getattr(element, "name", "")
+    ]
+
+
+def _normalized_layout_name(value: str) -> str:
+    return "".join(value.split()).casefold()
+
+
+def _layout_element_xy(
+    layout: Any,
+    element: Any,
+    position: LayoutElementPosition,
+) -> tuple[float, float]:
+    if position.anchor is None:
+        if position.x is None or position.y is None:
+            raise ValueError("Absolute layout element positions require both x and y.")
+        return position.x + position.offset_x, position.y + position.offset_y
+
+    page_width = _layout_number(layout, "pageWidth")
+    page_height = _layout_number(layout, "pageHeight")
+    element_width = _layout_number(element, "elementWidth")
+    element_height = _layout_number(element, "elementHeight")
+
+    if position.anchor == "bottom_left":
+        x, y = 0.0, 0.0
+    elif position.anchor == "bottom_center":
+        x, y = (page_width - element_width) / 2, 0.0
+    elif position.anchor == "bottom_right":
+        x, y = page_width - element_width, 0.0
+    elif position.anchor == "middle_left":
+        x, y = 0.0, (page_height - element_height) / 2
+    elif position.anchor == "center":
+        x, y = (page_width - element_width) / 2, (page_height - element_height) / 2
+    elif position.anchor == "middle_right":
+        x, y = page_width - element_width, (page_height - element_height) / 2
+    elif position.anchor == "top_left":
+        x, y = 0.0, page_height - element_height
+    elif position.anchor == "top_center":
+        x, y = (page_width - element_width) / 2, page_height - element_height
+    elif position.anchor == "top_right":
+        x, y = page_width - element_width, page_height - element_height
+    else:
+        raise ValueError(f"Unsupported layout element anchor: {position.anchor}")
+
+    return x + position.offset_x, y + position.offset_y
+
+
+def _layout_number(element: Any, attribute: str) -> float:
+    value = getattr(element, attribute, None)
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise RuntimeError(f"Layout element is missing numeric {attribute}.")
+    return float(value)
+
+
+def _set_layout_element_bottom_left_anchor(element: Any) -> None:
+    if not hasattr(element, "setAnchor"):
+        return
+    try:
+        element.setAnchor("BOTTOM_LEFT_CORNER")
+    except Exception:
+        pass
 
 
 def _apply_extent(arcpy: Any, layout: Any, map_obj: Any, request: RenderPreviewRequest) -> None:

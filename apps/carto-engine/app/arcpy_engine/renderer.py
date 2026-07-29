@@ -67,9 +67,6 @@ class ArcPyRenderer:
         result_path = output_dir / "result.json"
         command = [
             str(self.settings.python_exe),
-            "-u",
-            "-X",
-            "faulthandler",
             "-m",
             "app.arcpy_engine.worker",
             "--job-id",

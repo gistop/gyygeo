@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class LayerConfig(BaseModel):
@@ -28,6 +28,38 @@ class LayoutText(BaseModel):
     text: str
 
 
+LayoutAnchor = Literal[
+    "bottom_left",
+    "bottom_center",
+    "bottom_right",
+    "middle_left",
+    "center",
+    "middle_right",
+    "top_left",
+    "top_center",
+    "top_right",
+]
+
+
+class LayoutElementPosition(BaseModel):
+    element_name: str = Field(..., min_length=1)
+    anchor: Optional[LayoutAnchor] = None
+    x: Optional[float] = None
+    y: Optional[float] = None
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+
+    @model_validator(mode="after")
+    def validate_position(self) -> "LayoutElementPosition":
+        has_anchor = self.anchor is not None
+        has_absolute_position = self.x is not None or self.y is not None
+        if has_anchor and has_absolute_position:
+            raise ValueError("Use either anchor or x/y for a layout element position, not both.")
+        if not has_anchor and (self.x is None or self.y is None):
+            raise ValueError("A layout element position requires either anchor or both x and y.")
+        return self
+
+
 class ExportOptions(BaseModel):
     format: Literal["png", "jpg", "pdf"] = "png"
     dpi: int = Field(default=150, ge=72, le=600)
@@ -46,6 +78,7 @@ class MapProjectConfig(BaseModel):
     fit_layer_names: List[str] = Field(default_factory=list)
     fit_padding: float = Field(default=0.08, ge=0.0, le=1.0)
     layout_text: List[LayoutText] = Field(default_factory=list)
+    layout_elements: List[LayoutElementPosition] = Field(default_factory=list)
     export: ExportOptions = Field(default_factory=ExportOptions)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

@@ -20,10 +20,35 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 TaskStatus = Literal["queued", "running", "waiting_for_user", "done", "failed"]
 StepStatus = Literal["pending", "running", "done", "failed"]
+LayoutAnchor = Literal[
+    "bottom_left",
+    "bottom_center",
+    "bottom_right",
+    "middle_left",
+    "center",
+    "middle_right",
+    "top_left",
+    "top_center",
+    "top_right",
+]
 
 _tasks: dict[str, "AgentTask"] = {}
 _tasks_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="carto-agent")
+
+_NORTH_ARROW_ELEMENT_NAME = "zbz"
+_DEFAULT_LAYOUT_ELEMENT_INSET = 0.3
+_ANCHOR_PATTERNS: list[tuple[LayoutAnchor, tuple[str, ...]]] = [
+    ("bottom_left", ("左下角", "左下", "lower left", "bottom left")),
+    ("bottom_right", ("右下角", "右下", "lower right", "bottom right")),
+    ("top_left", ("左上角", "左上", "upper left", "top left")),
+    ("top_right", ("右上角", "右上", "upper right", "top right")),
+    ("bottom_center", ("下方居中", "底部居中", "底端居中", "bottom center")),
+    ("top_center", ("上方居中", "顶部居中", "顶端居中", "top center")),
+    ("middle_left", ("左侧居中", "左边居中", "左中", "middle left")),
+    ("middle_right", ("右侧居中", "右边居中", "右中", "middle right")),
+    ("center", ("页面中间", "版面中间", "居中", "中间", "center")),
+]
 
 
 class AgentChatMessage(BaseModel):
@@ -94,14 +119,15 @@ def chat(request: Request, payload: AgentChatRequest) -> AgentChatResponse:
     if not user_message:
         raise HTTPException(status_code=400, detail="A user message is required.")
 
-    if not _is_research_area_overview_request(user_message):
+    if not _is_supported_agent_request(user_message):
         return AgentChatResponse(
             message=AgentChatMessage(
                 role="assistant",
                 content=(
                     "I can run the research-area overview map workflow now. "
                     "Try: make a research area overview map from the current AOI, "
-                    "using remote sensing imagery, output jpg."
+                    "using remote sensing imagery, output jpg. You can also ask me to "
+                    "move the north arrow, for example: 把指北针放到左下角."
                 ),
             )
         )
@@ -163,11 +189,16 @@ def _is_research_area_overview_request(message: str) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
+def _is_supported_agent_request(message: str) -> bool:
+    return _is_research_area_overview_request(message) or bool(_extract_layout_elements(message))
+
+
 def _create_task(message: str, context: AgentPageContext) -> AgentTask:
     now = _now()
     task_id = "agent_" + uuid4().hex
     study_area_name = _extract_study_area_name(message)
     output_format = _extract_output_format(message)
+    layout_elements = _extract_layout_elements(message)
     title = context.map_title or (
         f"{study_area_name} Research Area Overview Map"
         if study_area_name
@@ -198,6 +229,7 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
             "template_id": "default",
             "layout_name": context.layout_name,
             "fit_padding": 0.08,
+            "layout_elements": layout_elements,
         },
         "output": {
             "format": output_format,
@@ -472,6 +504,7 @@ def _tool_render_research_area_overview_map(
             "fit_to_layers": True,
             "fit_layer_names": ["Remote Sensing Basemap"],
             "fit_padding": map_spec["layout"].get("fit_padding", 0.08),
+            "layout_elements": map_spec["layout"].get("layout_elements") or [],
             "export": {
                 "format": map_spec["output"]["format"],
                 "dpi": map_spec["output"]["dpi"],
@@ -632,6 +665,64 @@ def _extract_output_format(message: str) -> str:
     if "jpg" in lowered or "jpeg" in lowered:
         return "jpg"
     return "png"
+
+
+def _extract_layout_elements(message: str) -> List[Dict[str, Any]]:
+    if "指北针" not in message and "north arrow" not in message.lower():
+        return []
+
+    anchor = _extract_layout_anchor(message)
+    if anchor is None:
+        return []
+
+    inset = _extract_layout_element_inset(message)
+    offset_x, offset_y = _inset_offsets(anchor, inset)
+    return [
+        {
+            "element_name": _NORTH_ARROW_ELEMENT_NAME,
+            "anchor": anchor,
+            "offset_x": offset_x,
+            "offset_y": offset_y,
+        }
+    ]
+
+
+def _extract_layout_anchor(message: str) -> Optional[LayoutAnchor]:
+    lowered = message.lower()
+    for anchor, patterns in _ANCHOR_PATTERNS:
+        if any(pattern in message or pattern in lowered for pattern in patterns):
+            return anchor
+    return None
+
+
+def _extract_layout_element_inset(message: str) -> float:
+    patterns = [
+        r"(?:距离边缘|离边缘|边距|缩进|间距|偏移)\s*([0-9]+(?:\.[0-9]+)?)",
+        r"([0-9]+(?:\.[0-9]+)?)\s*(?:的)?(?:边距|缩进|间距)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if match:
+            return float(match.group(1))
+    return _DEFAULT_LAYOUT_ELEMENT_INSET
+
+
+def _inset_offsets(anchor: LayoutAnchor, inset: float) -> tuple[float, float]:
+    if anchor.endswith("_left"):
+        offset_x = inset
+    elif anchor.endswith("_right"):
+        offset_x = -inset
+    else:
+        offset_x = 0.0
+
+    if anchor.startswith("bottom_"):
+        offset_y = inset
+    elif anchor.startswith("top_"):
+        offset_y = -inset
+    else:
+        offset_y = 0.0
+
+    return offset_x, offset_y
 
 
 def _extract_study_area_name(message: str) -> Optional[str]:

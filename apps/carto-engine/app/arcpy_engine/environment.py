@@ -15,7 +15,7 @@ def probe_arcpy(python_exe: Path, working_dir: Path, timeout_seconds: int = 30) 
     )
     try:
         completed = subprocess.run(
-            [str(python_exe), "-u", "-X", "faulthandler", "-c", code],
+            [str(python_exe), "-c", code],
             cwd=str(working_dir),
             capture_output=True,
             text=True,

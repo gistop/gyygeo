@@ -127,6 +127,50 @@ Example:
 }
 ```
 
+### Layout Element Positions
+
+`layout_elements` moves existing layout elements by exact element name. Positions can use absolute
+page coordinates (`x` and `y`) or a page anchor plus optional offsets. Page coordinates use the
+ArcGIS layout page units from the template.
+
+Supported anchors:
+
+- `bottom_left`
+- `bottom_center`
+- `bottom_right`
+- `middle_left`
+- `center`
+- `middle_right`
+- `top_left`
+- `top_center`
+- `top_right`
+
+Example: move an existing north arrow element named `zbz` to the lower-left corner with a small inset.
+
+```json
+{
+  "requested_by": "local-dev",
+  "dry_run": false,
+  "project": {
+    "project_name": "layout-element-demo",
+    "template_id": "default",
+    "layout_elements": [
+      {
+        "element_name": "zbz",
+        "anchor": "bottom_left",
+        "offset_x": 0.3,
+        "offset_y": 0.3
+      }
+    ],
+    "export": {
+      "format": "png",
+      "dpi": 150,
+      "layout_name": "甯冨眬"
+    }
+  }
+}
+```
+
 ## Get Job
 
 ```http
