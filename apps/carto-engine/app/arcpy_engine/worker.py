@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from app.core.config import get_settings
-from app.schemas.project import LayoutElementPosition, LayoutText, RenderPreviewRequest
+from app.schemas.project import LayoutElementPosition, LayoutPage, LayoutText, RenderPreviewRequest
 
 _LAYOUT_ELEMENT_TYPES = (
     "GRAPHIC_ELEMENT",
@@ -20,6 +20,27 @@ _LAYOUT_ELEMENT_TYPES = (
     "TABLEFRAME_ELEMENT",
     "TEXT_ELEMENT",
 )
+
+_STANDARD_PAGE_SIZES_MM = {
+    "a0": (841.0, 1189.0),
+    "a1": (594.0, 841.0),
+    "a2": (420.0, 594.0),
+    "a3": (297.0, 420.0),
+    "a4": (210.0, 297.0),
+    "letter": (215.9, 279.4),
+    "legal": (215.9, 355.6),
+}
+
+_PAGE_UNIT_TO_MM = {
+    "MILLIMETER": 1.0,
+    "MILLIMETERS": 1.0,
+    "CENTIMETER": 10.0,
+    "CENTIMETERS": 10.0,
+    "INCH": 25.4,
+    "INCHES": 25.4,
+    "POINT": 25.4 / 72.0,
+    "POINTS": 25.4 / 72.0,
+}
 
 
 def main() -> int:
@@ -76,6 +97,7 @@ def render_with_arcpy(
                     added.transparency = int(round((1.0 - layer_config.opacity) * 100))
                 messages.append(f"Added layer {layer_config.name}: {layer_config.data_source}")
 
+        messages.extend(_apply_layout_page(layout, request.project.page))
         _apply_title(layout, request.project.title)
         _apply_layout_text(layout, request.project.layout_text)
         messages.extend(_apply_layout_element_positions(layout, request.project.layout_elements))
@@ -147,6 +169,87 @@ def _apply_layout_text(layout: Any, layout_text: list[LayoutText]) -> None:
         element = elements.get(item.element_name)
         if element is not None:
             element.text = item.text
+
+
+def _apply_layout_page(layout: Any, page: Optional[LayoutPage]) -> list[str]:
+    if page is None:
+        return []
+
+    width, height = _layout_page_dimensions(layout, page)
+    if hasattr(layout, "changePageSize"):
+        layout.changePageSize(width, height, page.resize_elements)
+    else:
+        _set_layout_page_size(layout, width, height)
+
+    resize_text = " with resized elements" if page.resize_elements else ""
+    return [f"Changed layout page size to {width:.3f} x {height:.3f}{resize_text}"]
+
+
+def _layout_page_dimensions(layout: Any, page: LayoutPage) -> tuple[float, float]:
+    layout_units = _layout_page_units(layout)
+    if page.size is not None:
+        width, height = _convert_page_size(
+            _STANDARD_PAGE_SIZES_MM[page.size],
+            from_units="millimeter",
+            to_units=layout_units,
+        )
+    elif page.width is not None and page.height is not None:
+        width, height = _convert_page_size(
+            (page.width, page.height),
+            from_units=page.units or layout_units,
+            to_units=layout_units,
+        )
+    else:
+        width = _layout_number(layout, "pageWidth")
+        height = _layout_number(layout, "pageHeight")
+
+    if page.orientation == "landscape" and width < height:
+        width, height = height, width
+    elif page.orientation == "portrait" and width > height:
+        width, height = height, width
+
+    if width <= 0 or height <= 0 or not math.isfinite(width) or not math.isfinite(height):
+        raise ValueError("Layout page dimensions must be positive finite numbers.")
+    return width, height
+
+
+def _layout_page_units(layout: Any) -> str:
+    units = getattr(layout, "pageUnits", None)
+    if units is None:
+        raise RuntimeError("Layout is missing pageUnits.")
+    return _normalized_page_units(str(units))
+
+
+def _normalized_page_units(units: str) -> str:
+    normalized = units.strip().upper().replace(" ", "_")
+    if normalized in {"MM", "MILLIMETRE", "MILLIMETRES"}:
+        normalized = "MILLIMETER"
+    elif normalized in {"CM", "CENTIMETRE", "CENTIMETRES"}:
+        normalized = "CENTIMETER"
+    elif normalized == "IN":
+        normalized = "INCH"
+    if normalized not in _PAGE_UNIT_TO_MM:
+        raise RuntimeError(f"Unsupported layout page units: {units}")
+    return normalized
+
+
+def _convert_page_size(
+    size: tuple[float, float],
+    *,
+    from_units: str,
+    to_units: str,
+) -> tuple[float, float]:
+    from_mm = _PAGE_UNIT_TO_MM[_normalized_page_units(from_units)]
+    to_mm = _PAGE_UNIT_TO_MM[_normalized_page_units(to_units)]
+    return size[0] * from_mm / to_mm, size[1] * from_mm / to_mm
+
+
+def _set_layout_page_size(layout: Any, width: float, height: float) -> None:
+    try:
+        layout.pageWidth = width
+        layout.pageHeight = height
+    except Exception as exc:
+        raise RuntimeError("Layout page size cannot be changed with this ArcPy runtime.") from exc
 
 
 def _apply_layout_element_positions(

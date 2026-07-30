@@ -4,8 +4,8 @@ from typing import List, Optional
 
 import pytest
 
-from app.arcpy_engine.worker import _apply_layout_element_positions
-from app.schemas.project import LayoutElementPosition, RenderPreviewRequest
+from app.arcpy_engine.worker import _apply_layout_element_positions, _apply_layout_page
+from app.schemas.project import LayoutElementPosition, LayoutPage, RenderPreviewRequest
 
 
 class FakeElement:
@@ -40,6 +40,7 @@ class FakeElement:
 class FakeLayout:
     pageWidth = 10.0
     pageHeight = 8.0
+    pageUnits = "CENTIMETER"
     valid_element_types = {
         "GRAPHIC_ELEMENT",
         "GROUP_ELEMENT",
@@ -60,6 +61,16 @@ class FakeLayout:
         wildcard: Optional[str] = None,
     ) -> List[FakeElement]:
         return _filter_fake_elements(self.elements, element_type, wildcard)
+
+    def changePageSize(
+        self,
+        page_width: float,
+        page_height: float,
+        resize_elements: bool = True,
+    ) -> None:
+        self.pageWidth = page_width
+        self.pageHeight = page_height
+        self.resize_elements = resize_elements
 
 
 def _filter_fake_elements(
@@ -99,6 +110,35 @@ def test_layout_element_anchor_position_uses_page_bounds() -> None:
     assert north_arrow.elementPositionX == 0.25
     assert north_arrow.elementPositionY == 0.5
     assert messages == ["Moved layout element North Arrow to 0.250, 0.500"]
+
+
+def test_layout_page_named_size_converts_to_layout_units() -> None:
+    layout = FakeLayout([])
+
+    messages = _apply_layout_page(layout, LayoutPage(size="a4", orientation="landscape"))
+
+    assert layout.pageWidth == pytest.approx(29.7)
+    assert layout.pageHeight == pytest.approx(21.0)
+    assert layout.resize_elements is False
+    assert messages == ["Changed layout page size to 29.700 x 21.000"]
+
+
+def test_layout_page_orientation_only_uses_current_page_size() -> None:
+    layout = FakeLayout([])
+
+    _apply_layout_page(layout, LayoutPage(orientation="portrait"))
+
+    assert layout.pageWidth == pytest.approx(8.0)
+    assert layout.pageHeight == pytest.approx(10.0)
+
+
+def test_layout_page_custom_size_converts_units() -> None:
+    layout = FakeLayout([])
+
+    _apply_layout_page(layout, LayoutPage(width=11.0, height=8.5, units="inch"))
+
+    assert layout.pageWidth == pytest.approx(27.94)
+    assert layout.pageHeight == pytest.approx(21.59)
 
 
 def test_layout_element_top_right_anchor_accounts_for_element_size() -> None:
@@ -170,6 +210,11 @@ def test_layout_element_position_rejects_mixed_anchor_and_xy() -> None:
         LayoutElementPosition(element_name="North Arrow", anchor="bottom_left", x=1.0, y=1.0)
 
 
+def test_layout_page_rejects_mixed_named_and_custom_size() -> None:
+    with pytest.raises(ValueError, match="Use either page size"):
+        LayoutPage(size="a4", width=10.0, height=8.0)
+
+
 def test_render_request_accepts_layout_elements() -> None:
     request = RenderPreviewRequest(
         project={
@@ -187,3 +232,20 @@ def test_render_request_accepts_layout_elements() -> None:
     )
 
     assert request.project.layout_elements[0].anchor == "bottom_left"
+
+
+def test_render_request_accepts_page_options() -> None:
+    request = RenderPreviewRequest(
+        project={
+            "project_name": "demo-map",
+            "page": {
+                "size": "A4",
+                "orientation": "LANDSCAPE",
+            },
+        },
+        dry_run=True,
+    )
+
+    assert request.project.page is not None
+    assert request.project.page.size == "a4"
+    assert request.project.page.orientation == "landscape"

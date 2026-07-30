@@ -16,6 +16,7 @@ dist/
 .env
 .run/
 apps/carto-web-api/data/agent/*
+apps/carto-web-api/data/expert-runs/*
 
 # Engine runtime data
 apps/carto-engine/data/*

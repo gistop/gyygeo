@@ -109,6 +109,13 @@ export function sendAgentChat(payload: AgentChatPayload): Promise<AgentChatRespo
   });
 }
 
+export function sendExpertAgentChat(payload: AgentChatPayload): Promise<AgentChatResponse> {
+  return requestJson<AgentChatResponse>(`${config.cartoWebApiUrl}/api/v1/agent/expert/chat`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getAgentTask(taskId: string): Promise<AgentTask> {
   return requestJson<AgentTask>(`${config.cartoWebApiUrl}/api/v1/agent/tasks/${taskId}`);
 }

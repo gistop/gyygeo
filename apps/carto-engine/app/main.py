@@ -5,9 +5,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes.arcpy import router as arcpy_router
 from app.api.routes.health import router as health_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.render import router as render_router
+from app.arcpy_engine.code_runner import ArcPyCodeRunner
 from app.arcpy_engine.renderer import ArcPyRenderer
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -25,9 +27,11 @@ async def lifespan(app: FastAPI):
     store.initialize()
 
     renderer = ArcPyRenderer(settings)
+    code_runner = ArcPyCodeRunner(settings)
     runner = JobRunner(
         store=store,
         renderer=renderer,
+        code_runner=code_runner,
         output_root=settings.output_dir,
         max_workers=settings.max_workers,
     )
@@ -60,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(jobs_router, prefix=settings.api_prefix)
     app.include_router(render_router, prefix=settings.api_prefix)
+    app.include_router(arcpy_router, prefix=settings.api_prefix)
     return app
 
 

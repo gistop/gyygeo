@@ -60,6 +60,47 @@ class LayoutElementPosition(BaseModel):
         return self
 
 
+PageSizeName = Literal["a0", "a1", "a2", "a3", "a4", "letter", "legal"]
+PageOrientation = Literal["portrait", "landscape"]
+PageUnits = Literal["millimeter", "centimeter", "inch"]
+
+
+class LayoutPage(BaseModel):
+    size: Optional[PageSizeName] = None
+    orientation: Optional[PageOrientation] = None
+    width: Optional[float] = Field(default=None, gt=0.0)
+    height: Optional[float] = Field(default=None, gt=0.0)
+    units: Optional[PageUnits] = None
+    resize_elements: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_page_options(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for key in ("size", "orientation", "units"):
+            value = normalized.get(key)
+            if isinstance(value, str):
+                normalized[key] = value.strip().lower()
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_page(self) -> "LayoutPage":
+        has_size = self.size is not None
+        has_width = self.width is not None
+        has_height = self.height is not None
+        if has_size and (has_width or has_height):
+            raise ValueError("Use either page size or custom width/height, not both.")
+        if has_width != has_height:
+            raise ValueError("Custom page size requires both width and height.")
+        if self.units is not None and not (has_width and has_height):
+            raise ValueError("Page units can only be used with custom width and height.")
+        if not has_size and not has_width and self.orientation is None:
+            raise ValueError("Page requires size, custom width/height, or orientation.")
+        return self
+
+
 class ExportOptions(BaseModel):
     format: Literal["png", "jpg", "pdf"] = "png"
     dpi: int = Field(default=150, ge=72, le=600)
@@ -79,6 +120,7 @@ class MapProjectConfig(BaseModel):
     fit_padding: float = Field(default=0.08, ge=0.0, le=1.0)
     layout_text: List[LayoutText] = Field(default_factory=list)
     layout_elements: List[LayoutElementPosition] = Field(default_factory=list)
+    page: Optional[LayoutPage] = None
     export: ExportOptions = Field(default_factory=ExportOptions)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

@@ -31,6 +31,8 @@ LayoutAnchor = Literal[
     "top_center",
     "top_right",
 ]
+PageSizeName = Literal["a0", "a1", "a2", "a3", "a4", "letter", "legal"]
+PageOrientation = Literal["portrait", "landscape"]
 
 _tasks: dict[str, "AgentTask"] = {}
 _tasks_lock = threading.Lock()
@@ -160,6 +162,33 @@ def chat(request: Request, payload: AgentChatRequest) -> AgentChatResponse:
     )
 
 
+@router.post("/expert/chat", response_model=AgentChatResponse)
+def expert_chat(request: Request, payload: AgentChatRequest) -> AgentChatResponse:
+    user_message = _latest_user_message(payload.messages)
+    if not user_message:
+        raise HTTPException(status_code=400, detail="A user message is required.")
+
+    settings = request.app.state.settings
+    code = _extract_python_code(user_message)
+    if code is None:
+        code = _generate_expert_arcpy_code(user_message, payload.context, settings)
+
+    task = _create_expert_task(user_message, payload.context, code)
+    _executor.submit(_run_expert_arcpy_code_task, task.id, settings)
+
+    return AgentChatResponse(
+        message=AgentChatMessage(
+            role="assistant",
+            content=(
+                f"Started expert ArcPy code task {task.id}. "
+                "I saved the generated script and am running it against a copied APRX."
+            ),
+        ),
+        model="gyygeo-expert-arcpy-0.1",
+        task=task,
+    )
+
+
 @router.get("/tasks/{task_id}", response_model=AgentTask)
 def get_task(task_id: str) -> AgentTask:
     task = _get_task(task_id)
@@ -190,7 +219,11 @@ def _is_research_area_overview_request(message: str) -> bool:
 
 
 def _is_supported_agent_request(message: str) -> bool:
-    return _is_research_area_overview_request(message) or bool(_extract_layout_elements(message))
+    return (
+        _is_research_area_overview_request(message)
+        or bool(_extract_layout_elements(message))
+        or bool(_extract_layout_page(message))
+    )
 
 
 def _create_task(message: str, context: AgentPageContext) -> AgentTask:
@@ -199,6 +232,7 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
     study_area_name = _extract_study_area_name(message)
     output_format = _extract_output_format(message)
     layout_elements = _extract_layout_elements(message)
+    layout_page = _extract_layout_page(message)
     title = context.map_title or (
         f"{study_area_name} Research Area Overview Map"
         if study_area_name
@@ -230,6 +264,7 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
             "layout_name": context.layout_name,
             "fit_padding": 0.08,
             "layout_elements": layout_elements,
+            "page": layout_page or None,
         },
         "output": {
             "format": output_format,
@@ -253,6 +288,48 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
             AgentStep(name="render_research_area_overview_map"),
             AgentStep(name="check_map_output"),
         ],
+    )
+    _save_task(task)
+    return task
+
+
+def _create_expert_task(
+    message: str,
+    context: Optional[AgentPageContext],
+    code: str,
+) -> AgentTask:
+    now = _now()
+    task_id = "expert_" + uuid4().hex
+    template_id = "default"
+    map_spec = {
+        "schema_version": "0.1",
+        "map_kind": "expert_arcpy_code",
+        "template_id": template_id,
+        "context": context.model_dump() if context else None,
+        "output": {
+            "format": "jpg",
+            "dpi": 300,
+        },
+    }
+    task = AgentTask(
+        id=task_id,
+        kind="expert_arcpy_code",
+        status="queued",
+        created_at=now,
+        updated_at=now,
+        message="Expert ArcPy code task queued.",
+        map_spec=map_spec,
+        steps=[
+            AgentStep(
+                name="run_arcpy_code",
+                input={
+                    "code_preview": code[:2000],
+                    "code_length": len(code),
+                },
+            ),
+            AgentStep(name="check_expert_output"),
+        ],
+        outputs={"code": code},
     )
     _save_task(task)
     return task
@@ -313,6 +390,33 @@ def _run_research_area_overview_task(task_id: str, settings: Any) -> None:
     except Exception as exc:  # noqa: BLE001
         task.error = _agent_error_message(exc)
         _set_task_status(task, "failed", f"Research-area overview map failed: {task.error}")
+
+
+def _run_expert_arcpy_code_task(task_id: str, settings: Any) -> None:
+    task = _require_task(task_id)
+    try:
+        _set_task_status(task, "running", "Running expert ArcPy code.")
+        run_result = _run_step(
+            task,
+            "run_arcpy_code",
+            lambda: _tool_run_arcpy_code(
+                task.map_spec,
+                str(task.outputs["code"]),
+                settings,
+                task.id,
+            ),
+        )
+        _merge_task_outputs(task, {"run": run_result})
+        check_result = _run_step(
+            task,
+            "check_expert_output",
+            lambda: _tool_check_expert_output(run_result),
+        )
+        _merge_task_outputs(task, {"qa": check_result})
+        _set_task_status(task, "done", "Expert ArcPy code completed.")
+    except Exception as exc:  # noqa: BLE001
+        task.error = str(exc)
+        _set_task_status(task, "failed", f"Expert ArcPy code failed: {task.error}")
 
 
 def _run_step(task: AgentTask, name: str, fn: Any) -> Dict[str, Any]:
@@ -505,6 +609,7 @@ def _tool_render_research_area_overview_map(
             "fit_layer_names": ["Remote Sensing Basemap"],
             "fit_padding": map_spec["layout"].get("fit_padding", 0.08),
             "layout_elements": map_spec["layout"].get("layout_elements") or [],
+            "page": map_spec["layout"].get("page"),
             "export": {
                 "format": map_spec["output"]["format"],
                 "dpi": map_spec["output"]["dpi"],
@@ -560,6 +665,249 @@ def _tool_check_map_output(
         "summary": "Map QA checks passed.",
         "checks": checks,
     }
+
+
+def _tool_run_arcpy_code(
+    map_spec: Dict[str, Any],
+    code: str,
+    settings: Any,
+    task_id: str,
+) -> Dict[str, Any]:
+    output = map_spec.get("output") or {}
+    payload = {
+        "code": code,
+        "requested_by": "gyygeo-expert-agent",
+        "project_name": task_id,
+        "template_id": map_spec.get("template_id") or "default",
+        "output_format": output.get("format") or "jpg",
+        "dpi": output.get("dpi") or 300,
+        "context": map_spec.get("context") or {},
+        "metadata": {
+            "agent_task_id": task_id,
+            "agent_task_kind": "expert_arcpy_code",
+        },
+    }
+    response = _post_json(f"{settings.carto_engine_url}/api/v1/arcpy/code", payload)
+    engine_job_id = response["job"]["id"]
+    job = _poll_job(settings.carto_engine_url, engine_job_id, timeout_seconds=600)
+    result = job.get("result") or {}
+    files = result.get("files") or {}
+    preview = files.get("preview")
+    if job.get("status") != "done" or not preview:
+        raise RuntimeError(f"ArcPy code engine job failed: {job.get('error') or job}")
+    return {
+        "summary": f"Executed ArcPy code through carto-engine job {engine_job_id}.",
+        "engine_job_id": engine_job_id,
+        "returncode": result.get("returncode"),
+        "files": files,
+        "job": job,
+    }
+
+
+def _tool_check_expert_output(run_result: Dict[str, Any]) -> Dict[str, Any]:
+    files = run_result.get("files") or {}
+    preview = files.get("preview")
+    checks = [
+        {
+            "name": "script_succeeded",
+            "status": "passed" if run_result.get("returncode") == 0 else "failed",
+        },
+        {
+            "name": "preview_output_present",
+            "status": "passed" if isinstance(preview, str) and bool(preview) else "failed",
+        },
+    ]
+    failed = [check for check in checks if check["status"] == "failed"]
+    if failed:
+        raise RuntimeError(f"Expert output QA failed: {failed}")
+    return {
+        "summary": "Expert output QA checks passed.",
+        "checks": checks,
+    }
+
+
+def _extract_python_code(message: str) -> Optional[str]:
+    fence = re.search(r"```(?:python|py)?\s*(.*?)```", message, flags=re.IGNORECASE | re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+
+    stripped = message.strip()
+    if "\n" in stripped and ("import arcpy" in stripped or "arcpy." in stripped):
+        return stripped
+    return None
+
+
+def _generate_expert_arcpy_code(
+    message: str,
+    context: Optional[AgentPageContext],
+    settings: Any,
+) -> str:
+    if not settings.deepseek_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "DeepSeek API key is not configured. Expert mode needs it to generate ArcPy code, "
+                "or you can paste a complete Python script directly."
+            ),
+        )
+
+    context_json = json.dumps(context.model_dump() if context else {}, ensure_ascii=False, indent=2)
+    knowledge_prompt = _expert_knowledge_prompt(message, settings)
+    system_prompt = (
+        "You are an expert ArcGIS Pro ArcPy cartographer. Generate one complete Python script, "
+        "with no Markdown fences and no explanation. The server will define these variables before "
+        "your code runs: APRX_PATH, OUTPUT_DIR, OUTPUT_PATH, DPI, CONTEXT. Use ArcPy to open "
+        "APRX_PATH, modify the copied APRX according to the user request, save the APRX, and export "
+        "the chosen layout to OUTPUT_PATH as JPEG using DPI. Prefer aprx.listLayouts()[0] and "
+        "aprx.listMaps()[0] when names are unknown. The script must create OUTPUT_PATH.\n\n"
+        "Use the following project knowledge as authoritative runtime guidance:\n\n"
+        f"{knowledge_prompt}"
+    )
+    user_prompt = (
+        f"User map request:\n{message}\n\n"
+        f"Current web map context JSON:\n{context_json}\n\n"
+        "Return only executable Python code."
+    )
+    response = _deepseek_chat(
+        settings=settings,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+    )
+    code = _extract_python_code(response) or response.strip()
+    if not code:
+        raise HTTPException(status_code=502, detail="DeepSeek returned empty ArcPy code.")
+    return code
+
+
+def _expert_knowledge_prompt(message: str, settings: Any) -> str:
+    knowledge_dir = Path(settings.base_dir) / "app" / "agent_knowledge"
+    files = _select_expert_knowledge_files(message)
+    sections = []
+    for relative_path in files:
+        path = knowledge_dir / relative_path
+        if not path.exists():
+            continue
+        sections.append(
+            "### "
+            + relative_path.replace("\\", "/")
+            + "\n\n"
+            + path.read_text(encoding="utf-8").strip()
+        )
+    if not sections:
+        return "No project knowledge files were found. Follow the injected variable contract."
+    return "\n\n---\n\n".join(sections)
+
+
+def _select_expert_knowledge_files(message: str) -> List[str]:
+    lowered = message.lower()
+    files = [
+        "arcpy_runtime.md",
+        "arcpy_export.md",
+        "templates/default.md",
+    ]
+
+    title_patterns = (
+        "标题",
+        "题名",
+        "图名",
+        "文字",
+        "文本",
+        "title",
+        "text",
+        "label",
+    )
+    layout_element_patterns = (
+        "指北针",
+        "北箭头",
+        "比例尺",
+        "图例",
+        "north arrow",
+        "scale bar",
+        "legend",
+        "map surround",
+    )
+
+    if any(pattern in message or pattern in lowered for pattern in title_patterns):
+        files.extend(
+            [
+                "arcpy_layout_text.md",
+                "examples/add_title.py",
+            ]
+        )
+    if any(pattern in message or pattern in lowered for pattern in layout_element_patterns):
+        files.extend(
+            [
+                "arcpy_layout_elements.md",
+                "examples/move_north_arrow.py",
+            ]
+        )
+
+    files.append("examples/export_jpg.py")
+    return _dedupe_strings(files)
+
+
+def _dedupe_strings(values: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _deepseek_chat(
+    *,
+    settings: Any,
+    messages: List[Dict[str, str]],
+    temperature: float,
+) -> str:
+    request_body = json.dumps(
+        {
+            "model": settings.deepseek_model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+    ).encode("utf-8")
+    upstream_request = urllib.request.Request(
+        f"{settings.deepseek_base_url}/chat/completions",
+        data=request_body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {settings.deepseek_api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "gyygeo-carto-web-api/0.1.0",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(
+            upstream_request,
+            timeout=settings.deepseek_timeout_seconds,
+        ) as response:
+            upstream_payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"DeepSeek request failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="DeepSeek returned invalid JSON.") from exc
+
+    try:
+        content = upstream_payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail="DeepSeek response did not include a message.") from exc
+
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(status_code=502, detail="DeepSeek response message was empty.")
+    return content.strip()
 
 
 def _poll_job(base_url: str, job_id: str, *, timeout_seconds: int) -> Dict[str, Any]:
@@ -665,6 +1013,48 @@ def _extract_output_format(message: str) -> str:
     if "jpg" in lowered or "jpeg" in lowered:
         return "jpg"
     return "png"
+
+
+def _extract_layout_page(message: str) -> Dict[str, Any]:
+    page_size = _extract_page_size(message)
+    orientation = _extract_page_orientation(message)
+    if page_size is None and orientation is None:
+        return {}
+
+    page: Dict[str, Any] = {}
+    if page_size is not None:
+        page["size"] = page_size
+    if orientation is not None:
+        page["orientation"] = orientation
+    return page
+
+
+def _extract_page_size(message: str) -> Optional[PageSizeName]:
+    match = re.search(r"(?i)(a[0-4]|letter|legal)", message)
+    if not match:
+        return None
+    return match.group(1).lower()  # type: ignore[return-value]
+
+
+def _extract_page_orientation(message: str) -> Optional[PageOrientation]:
+    lowered = message.lower()
+    landscape_patterns = (
+        "\u6a2a\u7248",
+        "\u6a2a\u5411",
+        "landscape",
+        "horizontal",
+    )
+    portrait_patterns = (
+        "\u7ad6\u7248",
+        "\u7eb5\u5411",
+        "portrait",
+        "vertical",
+    )
+    if any(pattern in message or pattern in lowered for pattern in landscape_patterns):
+        return "landscape"
+    if any(pattern in message or pattern in lowered for pattern in portrait_patterns):
+        return "portrait"
+    return None
 
 
 def _extract_layout_elements(message: str) -> List[Dict[str, Any]]:

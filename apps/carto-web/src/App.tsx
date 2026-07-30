@@ -30,6 +30,7 @@ import {
   prepareRaster,
   renderPreview,
   sendAgentChat,
+  sendExpertAgentChat,
   searchItems,
 } from "./api";
 import type {
@@ -807,6 +808,7 @@ function MapPanel({
 }
 
 function ChatPanel({ context }: { context: AgentPageContext }) {
+  const [agentMode, setAgentMode] = useState<"workflow" | "expert">("workflow");
   const [draft, setDraft] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [reportedTaskId, setReportedTaskId] = useState<string | null>(null);
@@ -819,11 +821,13 @@ function ChatPanel({ context }: { context: AgentPageContext }) {
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const chatMutation = useMutation({
-    mutationFn: (nextMessages: AiChatMessage[]) =>
-      sendAgentChat({
+    mutationFn: (nextMessages: AiChatMessage[]) => {
+      const payload = {
         messages: nextMessages,
         context,
-      }),
+      };
+      return agentMode === "expert" ? sendExpertAgentChat(payload) : sendAgentChat(payload);
+    },
     onSuccess: (response) => {
       setMessages((current) => [...current, response.message]);
       if (response.task?.id) {
@@ -888,9 +892,28 @@ function ChatPanel({ context }: { context: AgentPageContext }) {
         </div>
         <span className="model-pill">
           <Sparkles size={14} />
-          gyygeo-agent
+          {agentMode === "expert" ? "expert-arcpy" : "gyygeo-agent"}
         </span>
       </header>
+
+      <div className="agent-mode-toggle segmented-control" aria-label="Agent mode">
+        <button
+          className={agentMode === "workflow" ? "active" : ""}
+          type="button"
+          onClick={() => setAgentMode("workflow")}
+        >
+          <Play size={15} />
+          工作流
+        </button>
+        <button
+          className={agentMode === "expert" ? "active" : ""}
+          type="button"
+          onClick={() => setAgentMode("expert")}
+        >
+          <Sparkles size={15} />
+          专家
+        </button>
+      </div>
 
       <div className="chat-list" ref={messageListRef}>
         {messages.map((message, index) => (
@@ -934,7 +957,11 @@ function ChatPanel({ context }: { context: AgentPageContext }) {
               submitMessage();
             }
           }}
-          placeholder="问问当前地图、数据或制图流程"
+          placeholder={
+            agentMode === "expert"
+              ? "描述制图需求，或直接粘贴完整 ArcPy Python"
+              : "问问当前地图、数据或制图流程"
+          }
           rows={3}
         />
         <button className="send-button" type="submit" disabled={!draft.trim() || chatMutation.isPending}>
@@ -959,10 +986,19 @@ function formatAgentTaskResult(task: AgentTask): string {
     return `Agent task ${task.id} failed: ${task.error ?? task.message}`;
   }
   const render = task.outputs?.render as { files?: { preview?: unknown } } | undefined;
-  const preview = typeof render?.files?.preview === "string" ? render.files.preview : "-";
+  const run = task.outputs?.run as
+    | { files?: { preview?: unknown; script?: unknown; stderr?: unknown } }
+    | undefined;
+  const preview =
+    typeof render?.files?.preview === "string"
+      ? render.files.preview
+      : typeof run?.files?.preview === "string"
+        ? run.files.preview
+        : "-";
   const qa = task.outputs?.qa as { summary?: unknown } | undefined;
   const qaSummary = typeof qa?.summary === "string" ? qa.summary : "QA finished.";
-  return `Agent task ${task.id} completed.\nOutput: ${preview}\n${qaSummary}`;
+  const script = typeof run?.files?.script === "string" ? `\nScript: ${run.files.script}` : "";
+  return `Agent task ${task.id} completed.\nOutput: ${preview}${script}\n${qaSummary}`;
 }
 
 function JobLine({

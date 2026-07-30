@@ -4,6 +4,7 @@ from app.api.routes.agent import (
     AgentPageContext,
     _create_task,
     _extract_layout_elements,
+    _extract_layout_page,
     _is_supported_agent_request,
     _tool_render_research_area_overview_map,
 )
@@ -20,6 +21,13 @@ def test_extract_north_arrow_bottom_left_layout_element() -> None:
             "offset_y": 0.3,
         }
     ]
+
+
+def test_extract_a4_landscape_page() -> None:
+    assert _extract_layout_page("做一张A4横版研究区示意图") == {
+        "size": "a4",
+        "orientation": "landscape",
+    }
 
 
 def test_north_arrow_position_is_supported_agent_request() -> None:
@@ -58,6 +66,21 @@ def test_create_task_carries_layout_elements_into_map_spec() -> None:
     ]
 
 
+def test_create_task_carries_page_into_map_spec() -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        layout_name="布局",
+    )
+
+    task = _create_task("做一张A4横版研究区示意图", context)
+
+    assert task.map_spec["layout"]["page"] == {
+        "size": "a4",
+        "orientation": "landscape",
+    }
+
+
 def test_render_payload_includes_layout_elements(monkeypatch) -> None:
     captured = {}
 
@@ -83,6 +106,7 @@ def test_render_payload_includes_layout_elements(monkeypatch) -> None:
                 "template_id": "default",
                 "layout_name": "布局",
                 "fit_padding": 0.08,
+                "page": {"size": "a4", "orientation": "landscape"},
                 "layout_elements": [
                     {
                         "element_name": "zbz",
@@ -108,3 +132,7 @@ def test_render_payload_includes_layout_elements(monkeypatch) -> None:
             "offset_y": 0.3,
         }
     ]
+    assert captured["payload"]["project"]["page"] == {
+        "size": "a4",
+        "orientation": "landscape",
+    }

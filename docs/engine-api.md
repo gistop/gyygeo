@@ -127,6 +127,64 @@ Example:
 }
 ```
 
+### Layout Page Size
+
+`page` changes the selected layout page before layout text, layout element positioning, map-frame
+fitting, and export. Named page sizes are converted into the selected ArcGIS layout's current
+`pageUnits`.
+
+Supported named sizes:
+
+- `a0`
+- `a1`
+- `a2`
+- `a3`
+- `a4`
+- `letter`
+- `legal`
+
+Supported orientations:
+
+- `portrait`
+- `landscape`
+
+Example: render an A4 landscape output without resizing existing layout elements.
+
+```json
+{
+  "requested_by": "local-dev",
+  "dry_run": false,
+  "project": {
+    "project_name": "a4-landscape-demo",
+    "template_id": "default",
+    "page": {
+      "size": "a4",
+      "orientation": "landscape",
+      "resize_elements": false
+    },
+    "export": {
+      "format": "png",
+      "dpi": 150
+    }
+  }
+}
+```
+
+Custom page sizes can use `millimeter`, `centimeter`, or `inch`:
+
+```json
+{
+  "project": {
+    "project_name": "custom-page-demo",
+    "page": {
+      "width": 11,
+      "height": 8.5,
+      "units": "inch"
+    }
+  }
+}
+```
+
 ### Layout Element Positions
 
 `layout_elements` moves existing layout elements by exact element name. Positions can use absolute
@@ -170,6 +228,43 @@ Example: move an existing north arrow element named `zbz` to the lower-left corn
   }
 }
 ```
+
+## Create ArcPy Code Job
+
+```http
+POST /api/v1/arcpy/code
+Content-Type: application/json
+```
+
+This endpoint runs a complete ArcPy Python script against a copied APRX template. It is intended for
+expert/agent-generated code experiments. The engine injects these variables before the submitted
+code runs:
+
+- `APRX_PATH`
+- `OUTPUT_DIR`
+- `OUTPUT_PATH`
+- `DPI`
+- `CONTEXT`
+
+The submitted code must create `OUTPUT_PATH`.
+
+Example:
+
+```json
+{
+  "requested_by": "gyygeo-expert-agent",
+  "project_name": "expert-title-demo",
+  "template_id": "default",
+  "output_format": "jpg",
+  "dpi": 300,
+  "context": {
+    "map_title": "Expert Title Demo"
+  },
+  "code": "import arcpy\naprx = arcpy.mp.ArcGISProject(APRX_PATH)\nlayout = aprx.listLayouts()[0]\npoint = arcpy.Point(float(layout.pageWidth) / 2, float(layout.pageHeight) - 0.35)\naprx.createTextElement(layout, point, \"POINT\", \"Expert Title Demo\", text_size=24, name=\"Title\")\naprx.save()\nlayout.exportToJPEG(OUTPUT_PATH, resolution=DPI)\ndel aprx"
+}
+```
+
+Response status is `202 Accepted`. Poll the returned job ID through `GET /api/v1/jobs/{job_id}`.
 
 ## Get Job
 
