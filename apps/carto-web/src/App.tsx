@@ -229,6 +229,7 @@ export function App() {
       target_crs: targetCrs.trim() || undefined,
       map_title: mapTitle.trim() || undefined,
       layout_name: layoutName.trim() || undefined,
+      prepared_dataset_path: preparedDatasetPath,
     };
   }, [
     activeBbox,
@@ -241,6 +242,7 @@ export function App() {
     layoutName,
     limit,
     mapTitle,
+    preparedDatasetPath,
     provider,
     targetCrs,
     targetResolution,

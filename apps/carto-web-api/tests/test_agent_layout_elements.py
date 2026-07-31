@@ -2,10 +2,13 @@
 
 from app.api.routes.agent import (
     AgentPageContext,
+    _create_run_arcpy_code_tool_call,
+    _create_expert_task,
     _create_task,
     _extract_layout_elements,
     _extract_layout_page,
     _is_supported_agent_request,
+    _parse_expert_tool_call_content,
     _tool_render_research_area_overview_map,
 )
 
@@ -78,6 +81,65 @@ def test_create_task_carries_page_into_map_spec() -> None:
     assert task.map_spec["layout"]["page"] == {
         "size": "a4",
         "orientation": "landscape",
+    }
+
+
+def test_create_expert_task_carries_prepared_dataset_path_into_context() -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        prepared_dataset_path="C:\\data-service\\cache\\prepared\\demo.tif",
+    )
+
+    task = _create_expert_task("专家制图", context, _create_run_arcpy_code_tool_call("print('ok')"))
+
+    assert task.map_spec["context"]["prepared_dataset_path"] == (
+        "C:\\data-service\\cache\\prepared\\demo.tif"
+    )
+
+
+def test_create_expert_task_uses_tool_call_output_options() -> None:
+    task = _create_expert_task(
+        "专家制图",
+        None,
+        _create_run_arcpy_code_tool_call(
+            "print('ok')",
+            output_format="pdf",
+            dpi=400,
+            template_id="default",
+        ),
+    )
+
+    assert task.kind == "expert_tool_call"
+    assert task.steps[0].name == "run_arcpy_code"
+    assert task.map_spec["output"] == {"format": "pdf", "dpi": 400}
+    assert task.outputs["tool_call"]["arguments"]["code"] == "print('ok')"
+
+
+def test_parse_expert_tool_call_content_accepts_json_wrapper() -> None:
+    tool_call = _parse_expert_tool_call_content(
+        """
+        {
+          "tool_call": {
+            "name": "run_arcpy_code",
+            "arguments": {
+              "code": "print('ok')",
+              "output_format": "jpeg",
+              "dpi": 300
+            }
+          }
+        }
+        """
+    )
+
+    assert tool_call == {
+        "name": "run_arcpy_code",
+        "arguments": {
+            "code": "print('ok')",
+            "output_format": "jpg",
+            "dpi": 300,
+            "template_id": "default",
+        },
     }
 
 

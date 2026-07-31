@@ -138,6 +138,7 @@ export interface AgentPageContext {
   target_crs?: string;
   map_title?: string;
   layout_name?: string;
+  prepared_dataset_path?: string;
 }
 
 export type AgentTaskStatus = "queued" | "running" | "waiting_for_user" | "done" | "failed";

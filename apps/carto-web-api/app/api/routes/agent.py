@@ -51,6 +51,47 @@ _ANCHOR_PATTERNS: list[tuple[LayoutAnchor, tuple[str, ...]]] = [
     ("middle_right", ("右侧居中", "右边居中", "右中", "middle right")),
     ("center", ("页面中间", "版面中间", "居中", "中间", "center")),
 ]
+_EXPERT_TOOL_RUN_ARCPY_CODE = "run_arcpy_code"
+_EXPERT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
+            "description": (
+                "Run a complete ArcPy cartography script through the internal carto-engine."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": (
+                            "Complete executable Python code. The runtime injects APRX_PATH, "
+                            "OUTPUT_DIR, OUTPUT_PATH, DPI, and CONTEXT."
+                        ),
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "enum": ["jpg", "png", "pdf"],
+                        "default": "jpg",
+                    },
+                    "dpi": {
+                        "type": "integer",
+                        "minimum": 72,
+                        "maximum": 600,
+                        "default": 300,
+                    },
+                    "template_id": {
+                        "type": "string",
+                        "default": "default",
+                    },
+                },
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+        },
+    }
+]
 
 
 class AgentChatMessage(BaseModel):
@@ -77,6 +118,7 @@ class AgentPageContext(BaseModel):
     target_crs: Optional[str] = None
     map_title: Optional[str] = None
     layout_name: Optional[str] = None
+    prepared_dataset_path: Optional[str] = None
 
 
 class AgentChatRequest(BaseModel):
@@ -155,7 +197,8 @@ def chat(request: Request, payload: AgentChatRequest) -> AgentChatResponse:
             role="assistant",
             content=(
                 f"Started research-area overview map task {task.id}. "
-                "I am using the current map AOI as the study-area boundary and will produce a jpg output."
+                "I am using the current map AOI as the study-area boundary and will "
+                "produce a jpg output."
             ),
         ),
         task=task,
@@ -169,22 +212,20 @@ def expert_chat(request: Request, payload: AgentChatRequest) -> AgentChatRespons
         raise HTTPException(status_code=400, detail="A user message is required.")
 
     settings = request.app.state.settings
-    code = _extract_python_code(user_message)
-    if code is None:
-        code = _generate_expert_arcpy_code(user_message, payload.context, settings)
+    tool_call = _expert_tool_call_from_user_message(user_message, payload.context, settings)
 
-    task = _create_expert_task(user_message, payload.context, code)
-    _executor.submit(_run_expert_arcpy_code_task, task.id, settings)
+    task = _create_expert_task(user_message, payload.context, tool_call)
+    _executor.submit(_run_expert_tool_call_task, task.id, settings)
 
     return AgentChatResponse(
         message=AgentChatMessage(
             role="assistant",
             content=(
-                f"Started expert ArcPy code task {task.id}. "
-                "I saved the generated script and am running it against a copied APRX."
+                f"Started expert tool task {task.id}. "
+                f"I am executing the internal {tool_call['name']} tool through carto-engine."
             ),
         ),
-        model="gyygeo-expert-arcpy-0.1",
+        model="gyygeo-expert-tools-0.1",
         task=task,
     )
 
@@ -296,40 +337,57 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
 def _create_expert_task(
     message: str,
     context: Optional[AgentPageContext],
-    code: str,
+    tool_call: Dict[str, Any],
 ) -> AgentTask:
     now = _now()
     task_id = "expert_" + uuid4().hex
-    template_id = "default"
+    tool_call = _normalize_expert_tool_call(tool_call)
+    tool_arguments = tool_call["arguments"]
+    code = tool_arguments["code"]
+    template_id = tool_arguments["template_id"]
     map_spec = {
         "schema_version": "0.1",
-        "map_kind": "expert_arcpy_code",
+        "map_kind": "expert_tool_call",
         "template_id": template_id,
         "context": context.model_dump() if context else None,
         "output": {
-            "format": "jpg",
-            "dpi": 300,
+            "format": tool_arguments["output_format"],
+            "dpi": tool_arguments["dpi"],
+        },
+        "tool_call": {
+            "name": tool_call["name"],
+            "arguments": {
+                "output_format": tool_arguments["output_format"],
+                "dpi": tool_arguments["dpi"],
+                "template_id": template_id,
+            },
         },
     }
     task = AgentTask(
         id=task_id,
-        kind="expert_arcpy_code",
+        kind="expert_tool_call",
         status="queued",
         created_at=now,
         updated_at=now,
-        message="Expert ArcPy code task queued.",
+        message="Expert internal tool task queued.",
         map_spec=map_spec,
         steps=[
             AgentStep(
-                name="run_arcpy_code",
+                name=tool_call["name"],
                 input={
+                    "tool_name": tool_call["name"],
                     "code_preview": code[:2000],
                     "code_length": len(code),
+                    "arguments": {
+                        "output_format": tool_arguments["output_format"],
+                        "dpi": tool_arguments["dpi"],
+                        "template_id": template_id,
+                    },
                 },
             ),
             AgentStep(name="check_expert_output"),
         ],
-        outputs={"code": code},
+        outputs={"tool_call": tool_call, "code": code},
     )
     _save_task(task)
     return task
@@ -392,19 +450,15 @@ def _run_research_area_overview_task(task_id: str, settings: Any) -> None:
         _set_task_status(task, "failed", f"Research-area overview map failed: {task.error}")
 
 
-def _run_expert_arcpy_code_task(task_id: str, settings: Any) -> None:
+def _run_expert_tool_call_task(task_id: str, settings: Any) -> None:
     task = _require_task(task_id)
     try:
-        _set_task_status(task, "running", "Running expert ArcPy code.")
+        _set_task_status(task, "running", "Running expert internal tool.")
+        tool_call = task.outputs["tool_call"]
         run_result = _run_step(
             task,
-            "run_arcpy_code",
-            lambda: _tool_run_arcpy_code(
-                task.map_spec,
-                str(task.outputs["code"]),
-                settings,
-                task.id,
-            ),
+            str(tool_call["name"]),
+            lambda: _execute_expert_tool_call(task, tool_call, settings),
         )
         _merge_task_outputs(task, {"run": run_result})
         check_result = _run_step(
@@ -413,10 +467,10 @@ def _run_expert_arcpy_code_task(task_id: str, settings: Any) -> None:
             lambda: _tool_check_expert_output(run_result),
         )
         _merge_task_outputs(task, {"qa": check_result})
-        _set_task_status(task, "done", "Expert ArcPy code completed.")
+        _set_task_status(task, "done", "Expert internal tool completed.")
     except Exception as exc:  # noqa: BLE001
         task.error = str(exc)
-        _set_task_status(task, "failed", f"Expert ArcPy code failed: {task.error}")
+        _set_task_status(task, "failed", f"Expert internal tool failed: {task.error}")
 
 
 def _run_step(task: AgentTask, name: str, fn: Any) -> Dict[str, Any]:
@@ -559,7 +613,9 @@ def _tool_write_study_area_boundary(
     base_dir: Path,
     task_id: str,
 ) -> Dict[str, Any]:
-    geometry = map_spec["study_area"].get("geometry") or _bbox_geometry(map_spec["study_area"]["bbox"])
+    geometry = map_spec["study_area"].get("geometry") or _bbox_geometry(
+        map_spec["study_area"]["bbox"]
+    )
     output_dir = base_dir / "data" / "agent" / task_id
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "study-area.geojson"
@@ -667,6 +723,22 @@ def _tool_check_map_output(
     }
 
 
+def _execute_expert_tool_call(
+    task: AgentTask,
+    tool_call: Dict[str, Any],
+    settings: Any,
+) -> Dict[str, Any]:
+    normalized = _normalize_expert_tool_call(tool_call)
+    if normalized["name"] == _EXPERT_TOOL_RUN_ARCPY_CODE:
+        return _tool_run_arcpy_code(
+            task.map_spec,
+            normalized["arguments"]["code"],
+            settings,
+            task.id,
+        )
+    raise ValueError(f"Unknown expert tool: {normalized['name']}")
+
+
 def _tool_run_arcpy_code(
     map_spec: Dict[str, Any],
     code: str,
@@ -737,16 +809,107 @@ def _extract_python_code(message: str) -> Optional[str]:
     return None
 
 
-def _generate_expert_arcpy_code(
+def _expert_tool_call_from_user_message(
     message: str,
     context: Optional[AgentPageContext],
     settings: Any,
-) -> str:
+) -> Dict[str, Any]:
+    code = _extract_python_code(message)
+    if code is not None:
+        return _create_run_arcpy_code_tool_call(
+            code,
+            output_format=_extract_expert_output_format(message),
+        )
+    return _generate_expert_tool_call(message, context, settings)
+
+
+def _create_run_arcpy_code_tool_call(
+    code: str,
+    *,
+    output_format: str = "jpg",
+    dpi: int = 300,
+    template_id: str = "default",
+) -> Dict[str, Any]:
+    return _normalize_expert_tool_call(
+        {
+            "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
+            "arguments": {
+                "code": code,
+                "output_format": output_format,
+                "dpi": dpi,
+                "template_id": template_id,
+            },
+        }
+    )
+
+
+def _normalize_expert_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    raw = tool_call
+    nested = raw.get("tool_call")
+    if isinstance(nested, dict):
+        raw = nested
+
+    name = raw.get("name") or raw.get("tool")
+    function = raw.get("function")
+    if isinstance(function, dict):
+        name = name or function.get("name")
+
+    arguments = raw.get("arguments") or raw.get("input")
+    if arguments is None and isinstance(function, dict):
+        arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Expert tool arguments were not valid JSON.") from exc
+    if not isinstance(arguments, dict):
+        raise ValueError("Expert tool call must include object arguments.")
+
+    if name != _EXPERT_TOOL_RUN_ARCPY_CODE:
+        raise ValueError(f"Unsupported expert tool: {name}")
+
+    code = arguments.get("code")
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("run_arcpy_code requires non-empty code.")
+
+    output_format = str(arguments.get("output_format") or arguments.get("format") or "jpg").lower()
+    if output_format == "jpeg":
+        output_format = "jpg"
+    if output_format not in {"jpg", "png", "pdf"}:
+        raise ValueError(f"Unsupported expert output format: {output_format}")
+
+    try:
+        dpi = int(arguments.get("dpi") or 300)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Expert tool dpi must be an integer.") from exc
+    if dpi < 72 or dpi > 600:
+        raise ValueError("Expert tool dpi must be between 72 and 600.")
+
+    template_id = str(arguments.get("template_id") or "default").strip()
+    if not template_id:
+        raise ValueError("Expert tool template_id cannot be empty.")
+
+    return {
+        "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
+        "arguments": {
+            "code": code.strip(),
+            "output_format": output_format,
+            "dpi": dpi,
+            "template_id": template_id,
+        },
+    }
+
+
+def _generate_expert_tool_call(
+    message: str,
+    context: Optional[AgentPageContext],
+    settings: Any,
+) -> Dict[str, Any]:
     if not settings.deepseek_api_key:
         raise HTTPException(
             status_code=503,
             detail=(
-                "DeepSeek API key is not configured. Expert mode needs it to generate ArcPy code, "
+                "DeepSeek API key is not configured. Expert mode needs it to generate a tool call, "
                 "or you can paste a complete Python script directly."
             ),
         )
@@ -754,32 +917,106 @@ def _generate_expert_arcpy_code(
     context_json = json.dumps(context.model_dump() if context else {}, ensure_ascii=False, indent=2)
     knowledge_prompt = _expert_knowledge_prompt(message, settings)
     system_prompt = (
-        "You are an expert ArcGIS Pro ArcPy cartographer. Generate one complete Python script, "
-        "with no Markdown fences and no explanation. The server will define these variables before "
-        "your code runs: APRX_PATH, OUTPUT_DIR, OUTPUT_PATH, DPI, CONTEXT. Use ArcPy to open "
-        "APRX_PATH, modify the copied APRX according to the user request, save the APRX, and export "
-        "the chosen layout to OUTPUT_PATH as JPEG using DPI. Prefer aprx.listLayouts()[0] and "
-        "aprx.listMaps()[0] when names are unknown. The script must create OUTPUT_PATH.\n\n"
+        "You are an expert ArcGIS Pro ArcPy cartographer in an internal agent. Use exactly one "
+        "internal tool: run_arcpy_code. If the chat API supports tool calls, call that tool. "
+        "If tool calls are unavailable, return only a JSON object with this shape: "
+        '{"name":"run_arcpy_code","arguments":{"code":"...","output_format":"jpg","dpi":300,'
+        '"template_id":"default"}}. The code must be a complete Python script with no Markdown. '
+        "The server will define APRX_PATH, OUTPUT_DIR, OUTPUT_PATH, DPI, and CONTEXT before the "
+        "code runs. Use ArcPy to open APRX_PATH, modify the copied APRX according to the user "
+        "request, save the APRX, and export the chosen layout to OUTPUT_PATH. Prefer "
+        "aprx.listLayouts()[0] and aprx.listMaps()[0] when names are unknown. If CONTEXT includes "
+        "prepared_dataset_path, treat it as the already-prepared local remote-sensing raster and "
+        "add it to the map with map_obj.addDataFromPath unless the user explicitly asks otherwise. "
+        "After adding that raster, set the layout map frame extent to the added layer extent with "
+        "approximately 8 percent padding. The script must create OUTPUT_PATH.\n\n"
         "Use the following project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
     user_prompt = (
         f"User map request:\n{message}\n\n"
         f"Current web map context JSON:\n{context_json}\n\n"
-        "Return only executable Python code."
+        "Create the internal tool call now."
     )
-    response = _deepseek_chat(
-        settings=settings,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-    )
-    code = _extract_python_code(response) or response.strip()
-    if not code:
-        raise HTTPException(status_code=502, detail="DeepSeek returned empty ArcPy code.")
-    return code
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    try:
+        completion_message = _deepseek_chat_completion(
+            settings=settings,
+            messages=messages,
+            temperature=0.1,
+            tools=_EXPERT_TOOL_SCHEMAS,
+            tool_choice={"type": "function", "function": {"name": _EXPERT_TOOL_RUN_ARCPY_CODE}},
+        )
+        return _parse_expert_tool_call_message(completion_message)
+    except HTTPException as exc:
+        if exc.status_code not in {400, 422}:
+            raise
+
+    fallback_content = _deepseek_chat(settings=settings, messages=messages, temperature=0.1)
+    try:
+        return _parse_expert_tool_call_content(fallback_content)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"DeepSeek returned invalid tool call: {exc}",
+        ) from exc
+
+
+def _parse_expert_tool_call_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    tool_calls = message.get("tool_calls") or []
+    if isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            if function.get("name") != _EXPERT_TOOL_RUN_ARCPY_CODE:
+                continue
+            return _normalize_expert_tool_call(
+                {
+                    "name": function.get("name"),
+                    "arguments": function.get("arguments") or {},
+                }
+            )
+
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return _parse_expert_tool_call_content(content)
+    raise HTTPException(status_code=502, detail="DeepSeek did not return an expert tool call.")
+
+
+def _parse_expert_tool_call_content(content: str) -> Dict[str, Any]:
+    stripped = content.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    if fence:
+        stripped = fence.group(1).strip()
+    if not stripped.startswith("{"):
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("No JSON object was found.")
+        stripped = stripped[start : end + 1]
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError("JSON object could not be decoded.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Tool call payload must be a JSON object.")
+    return _normalize_expert_tool_call(payload)
+
+
+def _extract_expert_output_format(message: str) -> str:
+    lowered = message.lower()
+    if "pdf" in lowered:
+        return "pdf"
+    if "png" in lowered:
+        return "png"
+    return "jpg"
 
 
 def _expert_knowledge_prompt(message: str, settings: Any) -> str:
@@ -866,14 +1103,37 @@ def _deepseek_chat(
     messages: List[Dict[str, str]],
     temperature: float,
 ) -> str:
-    request_body = json.dumps(
-        {
-            "model": settings.deepseek_model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-    ).encode("utf-8")
+    message = _deepseek_chat_completion(
+        settings=settings,
+        messages=messages,
+        temperature=temperature,
+    )
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(status_code=502, detail="DeepSeek response message was empty.")
+    return content.strip()
+
+
+def _deepseek_chat_completion(
+    *,
+    settings: Any,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    request_payload: Dict[str, Any] = {
+        "model": settings.deepseek_model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools is not None:
+        request_payload["tools"] = tools
+    if tool_choice is not None:
+        request_payload["tool_choice"] = tool_choice
+
+    request_body = json.dumps(request_payload).encode("utf-8")
     upstream_request = urllib.request.Request(
         f"{settings.deepseek_base_url}/chat/completions",
         data=request_body,
@@ -901,13 +1161,16 @@ def _deepseek_chat(
         raise HTTPException(status_code=502, detail="DeepSeek returned invalid JSON.") from exc
 
     try:
-        content = upstream_payload["choices"][0]["message"]["content"]
+        message = upstream_payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise HTTPException(status_code=502, detail="DeepSeek response did not include a message.") from exc
+        raise HTTPException(
+            status_code=502,
+            detail="DeepSeek response did not include a message.",
+        ) from exc
 
-    if not isinstance(content, str) or not content.strip():
-        raise HTTPException(status_code=502, detail="DeepSeek response message was empty.")
-    return content.strip()
+    if not isinstance(message, dict):
+        raise HTTPException(status_code=502, detail="DeepSeek response message was invalid.")
+    return message
 
 
 def _poll_job(base_url: str, job_id: str, *, timeout_seconds: int) -> Dict[str, Any]:
