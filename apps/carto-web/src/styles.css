@@ -364,20 +364,65 @@ textarea:focus {
 
 .item-card {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
   width: 100%;
-  padding: 10px;
+  padding: 8px;
   border: 1px solid #ded8ce;
   border-radius: 8px;
   text-align: left;
   color: #263332;
   background: #fff;
-  cursor: pointer;
 }
 
 .item-card.selected {
   border-color: #176b6f;
   background: #eef8f7;
+}
+
+.item-card-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.item-preview-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 36px;
+  min-width: 36px;
+  min-height: 34px;
+  padding: 0;
+  border: 1px solid #c7d8d5;
+  border-radius: 6px;
+  color: #176b6f;
+  background: #f5fbfa;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.item-preview-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.item-preview-button.active {
+  color: #176b6f;
+  border-color: #176b6f;
+  background: #e4f3f1;
+}
+
+.item-preview-button .filled-eye {
+  fill: currentColor;
 }
 
 .item-card span,

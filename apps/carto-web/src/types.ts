@@ -84,6 +84,24 @@ export interface PreparePayload {
   };
 }
 
+export interface TilejsonPayload {
+  provider: string;
+  collection: string;
+  item_id: string;
+  bands: string[];
+}
+
+export interface TilejsonResponse {
+  provider: string;
+  collection: string;
+  item_id: string;
+  tiles: string[];
+  tilejson: Record<string, unknown>;
+  bounds?: Bbox | null;
+  minzoom?: number | null;
+  maxzoom?: number | null;
+}
+
 export interface RenderPayload {
   requested_by?: string;
   dry_run: boolean;

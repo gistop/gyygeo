@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Crosshair,
   Database,
+  Eye,
   Loader2,
   Map,
   Pentagon,
@@ -27,6 +28,7 @@ import {
   getCartoJob,
   getDataHealth,
   getDataJob,
+  getPreviewTilejson,
   prepareRaster,
   renderPreview,
   sendAgentChat,
@@ -45,32 +47,44 @@ import type {
   PolygonGeometry,
   PreparePayload,
   SearchItem,
+  TilejsonResponse,
 } from "./types";
 
-const initialBbox: Bbox = [116.1, 39.7, 116.7, 40.2];
+interface PreviewRasterLayer {
+  itemId: string;
+  label: string;
+  tilejson: TilejsonResponse;
+  bounds?: Bbox;
+}
+
+const previewSourcePrefix = "landsat-preview-source";
+const previewLayerPrefix = "landsat-preview-layer";
+
+const initialBbox: Bbox = [111.60403861995178, 26.215688129123563, 111.61948814387728, 26.226467899170814];
 const initialPolygon: LngLatPair[] = [
-  [116.2, 39.78],
-  [116.58, 39.82],
-  [116.5, 40.1],
-  [116.24, 40.06],
+  [111.60403861995178, 26.215688129123563],
+  [111.61948814387728, 26.215688129123563],
+  [111.61948814387728, 26.226467899170814],
+  [111.60403861995178, 26.226467899170814],
 ];
 
 export function App() {
   const [provider, setProvider] = useState("mpc");
   const [collection, setCollection] = useState("landsat-c2-l2");
-  const [datetime, setDatetime] = useState("2025-07-01/2025-07-31");
+  const [datetime, setDatetime] = useState("2025-03-01/2025-05-31");
   const [cloudCover, setCloudCover] = useState("20");
   const [limit, setLimit] = useState("10");
   const [aoiMode, setAoiMode] = useState<AoiMode>("rectangle");
   const [bbox, setBbox] = useState<Bbox>(initialBbox);
   const [polygonCoordinates, setPolygonCoordinates] = useState<LngLatPair[]>(initialPolygon);
   const [bands, setBands] = useState("red,green,blue");
-  const [targetResolution, setTargetResolution] = useState("120");
+  const [targetResolution, setTargetResolution] = useState("30");
   const [targetCrs, setTargetCrs] = useState("EPSG:3857");
   const [mapTitle, setMapTitle] = useState("Landsat Map");
   const [layoutName, setLayoutName] = useState("Layout");
   const [dryRun, setDryRun] = useState(false);
   const [selectedItem, setSelectedItem] = useState<SearchItem | null>(null);
+  const [previewLayers, setPreviewLayers] = useState<PreviewRasterLayer[]>([]);
   const [prepareJobId, setPrepareJobId] = useState<string | null>(null);
   const [renderJobId, setRenderJobId] = useState<string | null>(null);
 
@@ -94,6 +108,10 @@ export function App() {
     return activeGeometry ? bboxFromCoordinates(polygonCoordinates) : bbox;
   }, [activeGeometry, bbox, polygonCoordinates]);
 
+  useEffect(() => {
+    setPreviewLayers([]);
+  }, [bands, collection, provider]);
+
   const searchMutation = useMutation({
     mutationFn: () =>
       {
@@ -109,17 +127,41 @@ export function App() {
         limit: clampInt(limit, 1, 100, 10),
         cloud_cover_lte: optionalNumber(cloudCover),
         });
-      },
+    },
     onSuccess: (response) => {
       setSelectedItem(response.items[0] ?? null);
+      setPreviewLayers([]);
       setPrepareJobId(null);
       setRenderJobId(null);
     },
   });
 
+  const previewMutation = useMutation({
+    mutationFn: (item: SearchItem) =>
+      getPreviewTilejson({
+        provider: item.provider || provider,
+        collection: item.collection || collection,
+        item_id: item.item_id,
+        bands: previewBands(splitCsv(bands), item),
+      }),
+    onSuccess: (response, item) => {
+      setSelectedItem(item);
+      setPreviewLayers((current) => [
+        ...current.filter((layer) => layer.itemId !== item.item_id),
+        {
+          itemId: item.item_id,
+          label: item.item_id,
+          tilejson: response,
+          bounds: validBbox(response.bounds) ?? validBbox(item.bbox),
+        },
+      ]);
+    },
+  });
+
   const prepareMutation = useMutation({
-    mutationFn: () => {
-      if (!selectedItem) {
+    mutationFn: (item?: SearchItem) => {
+      const itemToPrepare = item ?? selectedItem;
+      if (!itemToPrepare) {
         throw new Error("请先选择一个数据项。");
       }
       if (aoiMode === "polygon" && !activeGeometry) {
@@ -128,7 +170,7 @@ export function App() {
       const payload: PreparePayload = {
         provider,
         collection,
-        item_id: selectedItem.item_id,
+        item_id: itemToPrepare.item_id,
         bbox: activeBbox,
         geometry: activeGeometry,
         bbox_crs: "EPSG:4326",
@@ -342,22 +384,44 @@ export function App() {
               {items.length === 0 ? (
                 <div className="empty-state">暂无数据项</div>
               ) : (
-                items.map((item) => (
-                  <button
-                    key={item.item_id}
-                    type="button"
-                    className={`item-card ${
-                      selectedItem?.item_id === item.item_id ? "selected" : ""
-                    }`}
-                    onClick={() => setSelectedItem(item)}
-                  >
-                    <span>{item.item_id}</span>
-                    <small>{formatItemMeta(item)}</small>
-                  </button>
-                ))
+                items.map((item) => {
+                  const isSelected = selectedItem?.item_id === item.item_id;
+                  const isPreviewed = previewLayers.some((layer) => layer.itemId === item.item_id);
+                  const isPreviewLoading = previewMutation.isPending && previewMutation.variables?.item_id === item.item_id;
+                  return (
+                    <div key={item.item_id} className={`item-card ${isSelected ? "selected" : ""}`}>
+                      <button className="item-card-main" type="button" onClick={() => setSelectedItem(item)}>
+                        <span>{item.item_id}</span>
+                        <small>{formatItemMeta(item)}</small>
+                      </button>
+                      <button
+                        className={`item-preview-button ${isPreviewed ? "active" : ""}`}
+                        type="button"
+                        disabled={previewMutation.isPending}
+                        onClick={() => {
+                          setSelectedItem(item);
+                          if (isPreviewed) {
+                            setPreviewLayers((current) => current.filter((layer) => layer.itemId !== item.item_id));
+                          } else {
+                            previewMutation.mutate(item);
+                          }
+                        }}
+                        aria-label={isPreviewed ? "移除影像预览" : "预览影像"}
+                        title={isPreviewed ? "移除影像预览" : "预览影像"}
+                      >
+                        {isPreviewLoading ? (
+                          <Loader2 className="spin" size={15} />
+                        ) : (
+                          <Eye className={isPreviewed ? "filled-eye" : ""} size={16} />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })
               )}
             </div>
             {searchMutation.error ? <ErrorText error={searchMutation.error} /> : null}
+            {previewMutation.error ? <ErrorText error={previewMutation.error} /> : null}
           </div>
 
           <div className="control-stack">
@@ -383,7 +447,7 @@ export function App() {
               className="secondary-button"
               type="button"
               disabled={!canPrepare}
-              onClick={() => prepareMutation.mutate()}
+              onClick={() => prepareMutation.mutate(undefined)}
             >
               {prepareMutation.isPending ? <Loader2 className="spin" size={18} /> : <Database size={18} />}
               准备数据
@@ -430,6 +494,7 @@ export function App() {
             mode={aoiMode}
             bbox={bbox}
             polygon={polygonCoordinates}
+            previewLayers={previewLayers}
             onModeChange={setAoiMode}
             onBboxChange={setBbox}
             onPolygonChange={setPolygonCoordinates}
@@ -579,6 +644,7 @@ function MapPanel({
   mode,
   bbox,
   polygon,
+  previewLayers,
   onModeChange,
   onBboxChange,
   onPolygonChange,
@@ -586,6 +652,7 @@ function MapPanel({
   mode: AoiMode;
   bbox: Bbox;
   polygon: LngLatPair[];
+  previewLayers: PreviewRasterLayer[];
   onModeChange: (mode: AoiMode) => void;
   onBboxChange: (bbox: Bbox) => void;
   onPolygonChange: (polygon: LngLatPair[]) => void;
@@ -621,7 +688,7 @@ function MapPanel({
         ],
       },
       center: [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2],
-      zoom: 8,
+      zoom: 14,
     });
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
@@ -676,6 +743,75 @@ function MapPanel({
     const source = map.getSource("aoi") as GeoJSONSource | undefined;
     source?.setData(aoiFeatureCollection(mode, bbox, polygon));
   }, [bbox, mode, polygon]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+
+    const syncPreviewLayers = () => {
+      const activeLayerIds = new Set(previewLayers.map((layer) => previewLayerIdFor(layer.itemId)));
+      const activeSourceIds = new Set(previewLayers.map((layer) => previewSourceIdFor(layer.itemId)));
+      for (const layerId of previewLayerIds(map)) {
+        if (!activeLayerIds.has(layerId)) {
+          map.removeLayer(layerId);
+        }
+      }
+      for (const sourceId of previewSourceIds(map)) {
+        if (!activeSourceIds.has(sourceId)) {
+          map.removeSource(sourceId);
+        }
+      }
+
+      for (const layer of previewLayers) {
+        if (!layer.tilejson.tiles.length) {
+          continue;
+        }
+        const sourceId = previewSourceIdFor(layer.itemId);
+        const layerId = previewLayerIdFor(layer.itemId);
+        if (!map.getSource(sourceId)) {
+          map.addSource(sourceId, {
+            type: "raster",
+            tiles: layer.tilejson.tiles,
+            tileSize: 256,
+            bounds: layer.bounds,
+            minzoom: layer.tilejson.minzoom ?? undefined,
+            maxzoom: layer.tilejson.maxzoom ?? undefined,
+            attribution: "Microsoft Planetary Computer",
+          });
+        }
+        if (!map.getLayer(layerId)) {
+          map.addLayer(
+            {
+              id: layerId,
+              type: "raster",
+              source: sourceId,
+              paint: {
+                "raster-opacity": 0.74,
+              },
+            },
+            map.getLayer("aoi-fill") ? "aoi-fill" : undefined,
+          );
+        }
+      }
+
+      const latestBounds = previewLayers[previewLayers.length - 1]?.bounds;
+      if (latestBounds) {
+        map.fitBounds(latestBounds, { padding: 70, duration: 500, maxZoom: 13 });
+      }
+    };
+
+    if (map.isStyleLoaded()) {
+      syncPreviewLayers();
+      return;
+    }
+
+    map.once("load", syncPreviewLayers);
+    return () => {
+      map.off("load", syncPreviewLayers);
+    };
+  }, [previewLayers]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1159,6 +1295,53 @@ function splitCsv(value: string): string[] {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function previewBands(requestedBands: string[], item: SearchItem): string[] {
+  const assetKeys = new Set((item.assets ?? []).map((asset) => asset.key));
+  const requested = requestedBands.slice(0, 3).filter((band) => assetKeys.has(band));
+  if (requested.length >= 3) {
+    return requested;
+  }
+  if (assetKeys.has("visual")) {
+    return ["visual"];
+  }
+  return requestedBands.slice(0, 3);
+}
+
+function validBbox(value?: number[] | null): Bbox | undefined {
+  if (!Array.isArray(value) || value.length !== 4) {
+    return undefined;
+  }
+  const bbox = value.map(Number);
+  if (!bbox.every(Number.isFinite) || bbox[0] >= bbox[2] || bbox[1] >= bbox[3]) {
+    return undefined;
+  }
+  return [bbox[0], bbox[1], bbox[2], bbox[3]];
+}
+
+function previewSourceIdFor(itemId: string): string {
+  return `${previewSourcePrefix}-${safeMapId(itemId)}`;
+}
+
+function previewLayerIdFor(itemId: string): string {
+  return `${previewLayerPrefix}-${safeMapId(itemId)}`;
+}
+
+function previewLayerIds(map: MapLibreMap): string[] {
+  return map
+    .getStyle()
+    .layers.filter((layer) => layer.id.startsWith(`${previewLayerPrefix}-`))
+    .map((layer) => layer.id);
+}
+
+function previewSourceIds(map: MapLibreMap): string[] {
+  const sources = map.getStyle().sources ?? {};
+  return Object.keys(sources).filter((sourceId) => sourceId.startsWith(`${previewSourcePrefix}-`));
+}
+
+function safeMapId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]+/g, "-");
 }
 
 function isTerminal(status?: JobStatus): boolean {

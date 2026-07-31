@@ -11,6 +11,8 @@ import type {
   RenderPayload,
   SearchPayload,
   SearchResponse,
+  TilejsonPayload,
+  TilejsonResponse,
 } from "./types";
 
 export const config = {
@@ -75,6 +77,13 @@ export function searchItems(payload: SearchPayload): Promise<SearchResponse> {
 
 export function prepareRaster(payload: PreparePayload): Promise<JobCreateResponse> {
   return requestJson<JobCreateResponse>(`${config.dataServiceUrl}/api/v1/prepare-jobs`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getPreviewTilejson(payload: TilejsonPayload): Promise<TilejsonResponse> {
+  return requestJson<TilejsonResponse>(`${config.dataServiceUrl}/api/v1/tilejson`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

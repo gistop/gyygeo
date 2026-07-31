@@ -12,6 +12,7 @@ from app.api.routes.jobs import router as jobs_router
 from app.api.routes.prepare import router as prepare_router
 from app.api.routes.providers import router as providers_router
 from app.api.routes.searches import router as searches_router
+from app.api.routes.tilejson import router as tilejson_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.jobs.runner import PrepareJobRunner
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(providers_router, prefix=settings.api_prefix)
     app.include_router(searches_router, prefix=settings.api_prefix)
+    app.include_router(tilejson_router, prefix=settings.api_prefix)
     app.include_router(downloads_router, prefix=settings.api_prefix)
     app.include_router(prepare_router, prefix=settings.api_prefix)
     app.include_router(jobs_router, prefix=settings.api_prefix)

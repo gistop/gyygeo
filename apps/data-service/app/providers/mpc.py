@@ -13,6 +13,7 @@ from app.schemas.download import DownloadAssetsRequest
 from app.schemas.prepare import PrepareRasterRequest
 from app.schemas.provider import CollectionRecord, ProviderRecord
 from app.schemas.search import AssetSummary, SearchItem, SearchRequest
+from app.schemas.tilejson import TilejsonRequest, TilejsonResponse
 
 
 _MPC_COLLECTION_HINTS = {
@@ -426,6 +427,28 @@ class MpcProvider:
         response.raise_for_status()
         return response.json()
 
+    def get_tilejson(self, request: TilejsonRequest) -> TilejsonResponse:
+        self._ensure_search_dependencies()
+        tilejson = self._fetch_tilejson(
+            request.collection,
+            request.item_id,
+            request.bands,
+        )
+        tiles = tilejson.get("tiles") or []
+        if not isinstance(tiles, list) or not tiles:
+            raise RuntimeError(f"MPC tilejson did not include tiles for {request.item_id}.")
+        bounds = tilejson.get("bounds")
+        return TilejsonResponse(
+            provider=self.provider_id,
+            collection=request.collection,
+            item_id=request.item_id,
+            tiles=[str(tile) for tile in tiles],
+            tilejson=tilejson,
+            bounds=[float(value) for value in bounds] if isinstance(bounds, list) else None,
+            minzoom=_optional_int(tilejson.get("minzoom")),
+            maxzoom=_optional_int(tilejson.get("maxzoom")),
+        )
+
     def download_assets(self, request: DownloadAssetsRequest, output_dir: Path) -> DownloadedAssets:
         self._ensure_search_dependencies()
         import planetary_computer  # type: ignore
@@ -545,6 +568,13 @@ class MpcProvider:
 def _missing_distribution(package_name: str) -> bool:
     import_name = package_name.replace("-", "_")
     return importlib.util.find_spec(import_name) is None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _datetime_to_string(value: Any) -> Optional[str]:
