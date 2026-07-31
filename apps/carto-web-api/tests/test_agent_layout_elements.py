@@ -2,9 +2,11 @@
 
 from app.api.routes.agent import (
     AgentPageContext,
+    _complete_expert_tool_calls,
     _create_run_arcpy_code_tool_call,
     _create_expert_task,
     _create_task,
+    _execute_expert_tool_call,
     _extract_layout_elements,
     _extract_layout_page,
     _is_supported_agent_request,
@@ -113,34 +115,164 @@ def test_create_expert_task_uses_tool_call_output_options() -> None:
     assert task.kind == "expert_tool_call"
     assert task.steps[0].name == "run_arcpy_code"
     assert task.map_spec["output"] == {"format": "pdf", "dpi": 400}
-    assert task.outputs["tool_call"]["arguments"]["code"] == "print('ok')"
+    assert task.outputs["tool_calls"][0]["arguments"]["code"] == "print('ok')"
 
 
 def test_parse_expert_tool_call_content_accepts_json_wrapper() -> None:
-    tool_call = _parse_expert_tool_call_content(
+    tool_calls = _parse_expert_tool_call_content(
         """
         {
-          "tool_call": {
-            "name": "run_arcpy_code",
-            "arguments": {
-              "code": "print('ok')",
-              "output_format": "jpeg",
-              "dpi": 300
+          "tool_calls": [
+            {
+              "name": "search_remote_sensing_images",
+              "arguments": {
+                "limit": 5
+              }
+            },
+            {
+              "name": "prepare_remote_sensing_basemap",
+              "arguments": {}
+            },
+            {
+              "name": "run_arcpy_code",
+              "arguments": {
+                "code": "print('ok')",
+                "output_format": "jpeg",
+                "dpi": 300
+              }
             }
-          }
+          ]
         }
         """
     )
 
-    assert tool_call == {
-        "name": "run_arcpy_code",
-        "arguments": {
-            "code": "print('ok')",
-            "output_format": "jpg",
-            "dpi": 300,
-            "template_id": "default",
+    assert tool_calls == [
+        {
+            "name": "search_remote_sensing_images",
+            "arguments": {
+                "limit": 5,
+            },
         },
-    }
+        {
+            "name": "prepare_remote_sensing_basemap",
+            "arguments": {},
+        },
+        {
+            "name": "run_arcpy_code",
+            "arguments": {
+                "code": "print('ok')",
+                "output_format": "jpg",
+                "dpi": 300,
+                "template_id": "default",
+            },
+        },
+    ]
+
+
+def test_create_expert_task_can_queue_search_prepare_and_run() -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+    )
+
+    task = _create_expert_task(
+        "专家制图",
+        context,
+        [
+            {"name": "search_remote_sensing_images", "arguments": {"limit": 5}},
+            {"name": "prepare_remote_sensing_basemap", "arguments": {}},
+            _create_run_arcpy_code_tool_call("print('ok')"),
+        ],
+    )
+
+    assert [step.name for step in task.steps] == [
+        "search_remote_sensing_images",
+        "prepare_remote_sensing_basemap",
+        "run_arcpy_code",
+        "check_expert_output",
+    ]
+    assert task.map_spec["basemap"]["limit"] == 5
+    assert task.outputs["tool_calls"][0]["name"] == "search_remote_sensing_images"
+
+
+def test_complete_expert_tool_calls_backfills_prepare_and_run(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+    )
+
+    monkeypatch.setattr(
+        "app.api.routes.agent._generate_expert_run_arcpy_tool_call",
+        lambda message, context, settings: _create_run_arcpy_code_tool_call("print('ok')"),
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "搜索当前范围的遥感影像，准备RGB栅格，然后制作一张标题为 mj 的300dpi JPG地图",
+        context,
+        [{"name": "search_remote_sensing_images", "arguments": {}}],
+        object(),
+    )
+
+    assert [call["name"] for call in tool_calls] == [
+        "search_remote_sensing_images",
+        "prepare_remote_sensing_basemap",
+        "run_arcpy_code",
+    ]
+
+
+def test_expert_prepare_tool_updates_context_with_prepared_dataset(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+    )
+    task = _create_expert_task(
+        "专家制图",
+        context,
+        [
+            {"name": "search_remote_sensing_images", "arguments": {}},
+            {"name": "prepare_remote_sensing_basemap", "arguments": {}},
+        ],
+    )
+
+    def fake_post_json(url, payload):
+        if url.endswith("/searches"):
+            return {
+                "items": [
+                    {
+                        "item_id": "image-1",
+                        "datetime": "2026-01-01T00:00:00Z",
+                        "cloud_cover": 1.0,
+                    }
+                ]
+            }
+        if url.endswith("/prepare-jobs"):
+            return {"job": {"id": "prepare-1"}}
+        raise AssertionError(url)
+
+    def fake_poll_job(base_url, job_id, *, timeout_seconds):
+        return {
+            "id": job_id,
+            "status": "done",
+            "result": {"dataset": {"dataset_id": "dataset-1", "path": "C:\\data\\demo.tif"}},
+        }
+
+    monkeypatch.setattr("app.api.routes.agent._post_json", fake_post_json)
+    monkeypatch.setattr("app.api.routes.agent._poll_job", fake_poll_job)
+
+    search_result = _execute_expert_tool_call(
+        task,
+        task.outputs["tool_calls"][0],
+        type("Settings", (), {"data_service_url": "http://127.0.0.1:8010"})(),
+    )
+    task.outputs = {**task.outputs, "search": search_result}
+    prepare_result = _execute_expert_tool_call(
+        task,
+        task.outputs["tool_calls"][1],
+        type("Settings", (), {"data_service_url": "http://127.0.0.1:8010"})(),
+    )
+
+    assert prepare_result["dataset"]["path"] == "C:\\data\\demo.tif"
+    assert task.map_spec["context"]["prepared_dataset_path"] == "C:\\data\\demo.tif"
 
 
 def test_render_payload_includes_layout_elements(monkeypatch) -> None:

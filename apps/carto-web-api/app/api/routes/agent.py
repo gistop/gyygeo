@@ -52,7 +52,59 @@ _ANCHOR_PATTERNS: list[tuple[LayoutAnchor, tuple[str, ...]]] = [
     ("center", ("页面中间", "版面中间", "居中", "中间", "center")),
 ]
 _EXPERT_TOOL_RUN_ARCPY_CODE = "run_arcpy_code"
+_EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES = "search_remote_sensing_images"
+_EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP = "prepare_remote_sensing_basemap"
 _EXPERT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+            "description": (
+                "Search remote-sensing imagery through the internal data-service using the "
+                "current AOI and optional search filters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "default": "mpc"},
+                    "collection": {"type": "string"},
+                    "bbox": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
+                    "datetime": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+                    "cloud_cover_lte": {"type": "number"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP,
+            "description": (
+                "Prepare a local cartography-ready raster through the internal data-service. "
+                "Use after search_remote_sensing_images unless an item_id is already known."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "string"},
+                    "bands": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "target_resolution": {"type": "number"},
+                    "target_crs": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -212,9 +264,9 @@ def expert_chat(request: Request, payload: AgentChatRequest) -> AgentChatRespons
         raise HTTPException(status_code=400, detail="A user message is required.")
 
     settings = request.app.state.settings
-    tool_call = _expert_tool_call_from_user_message(user_message, payload.context, settings)
+    tool_calls = _expert_tool_calls_from_user_message(user_message, payload.context, settings)
 
-    task = _create_expert_task(user_message, payload.context, tool_call)
+    task = _create_expert_task(user_message, payload.context, tool_calls)
     _executor.submit(_run_expert_tool_call_task, task.id, settings)
 
     return AgentChatResponse(
@@ -222,7 +274,7 @@ def expert_chat(request: Request, payload: AgentChatRequest) -> AgentChatRespons
             role="assistant",
             content=(
                 f"Started expert tool task {task.id}. "
-                f"I am executing the internal {tool_call['name']} tool through carto-engine."
+                f"I am executing {len(tool_calls)} internal tool step(s)."
             ),
         ),
         model="gyygeo-expert-tools-0.1",
@@ -337,32 +389,35 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
 def _create_expert_task(
     message: str,
     context: Optional[AgentPageContext],
-    tool_call: Dict[str, Any],
+    tool_call: Dict[str, Any] | List[Dict[str, Any]],
 ) -> AgentTask:
     now = _now()
     task_id = "expert_" + uuid4().hex
-    tool_call = _normalize_expert_tool_call(tool_call)
-    tool_arguments = tool_call["arguments"]
-    code = tool_arguments["code"]
-    template_id = tool_arguments["template_id"]
-    map_spec = {
-        "schema_version": "0.1",
-        "map_kind": "expert_tool_call",
-        "template_id": template_id,
-        "context": context.model_dump() if context else None,
-        "output": {
-            "format": tool_arguments["output_format"],
-            "dpi": tool_arguments["dpi"],
-        },
-        "tool_call": {
-            "name": tool_call["name"],
-            "arguments": {
-                "output_format": tool_arguments["output_format"],
-                "dpi": tool_arguments["dpi"],
-                "template_id": template_id,
+    tool_calls = _normalize_expert_tool_calls(tool_call)
+    run_tool_call = _find_expert_tool_call(tool_calls, _EXPERT_TOOL_RUN_ARCPY_CODE)
+    run_arguments = run_tool_call["arguments"] if run_tool_call else {}
+    template_id = str(run_arguments.get("template_id") or "default")
+    output_format = str(run_arguments.get("output_format") or "jpg")
+    dpi = int(run_arguments.get("dpi") or 300)
+    map_spec = _create_expert_map_spec(
+        context,
+        tool_calls,
+        template_id=template_id,
+        output_format=output_format,
+        dpi=dpi,
+    )
+    steps = [
+        AgentStep(
+            name=call["name"],
+            input={
+                "tool_name": call["name"],
+                "arguments": _redact_expert_tool_arguments(call["arguments"]),
             },
-        },
-    }
+        )
+        for call in tool_calls
+    ]
+    if run_tool_call:
+        steps.append(AgentStep(name="check_expert_output"))
     task = AgentTask(
         id=task_id,
         kind="expert_tool_call",
@@ -371,23 +426,8 @@ def _create_expert_task(
         updated_at=now,
         message="Expert internal tool task queued.",
         map_spec=map_spec,
-        steps=[
-            AgentStep(
-                name=tool_call["name"],
-                input={
-                    "tool_name": tool_call["name"],
-                    "code_preview": code[:2000],
-                    "code_length": len(code),
-                    "arguments": {
-                        "output_format": tool_arguments["output_format"],
-                        "dpi": tool_arguments["dpi"],
-                        "template_id": template_id,
-                    },
-                },
-            ),
-            AgentStep(name="check_expert_output"),
-        ],
-        outputs={"tool_call": tool_call, "code": code},
+        steps=steps,
+        outputs={"tool_calls": tool_calls},
     )
     _save_task(task)
     return task
@@ -454,19 +494,25 @@ def _run_expert_tool_call_task(task_id: str, settings: Any) -> None:
     task = _require_task(task_id)
     try:
         _set_task_status(task, "running", "Running expert internal tool.")
-        tool_call = task.outputs["tool_call"]
-        run_result = _run_step(
-            task,
-            str(tool_call["name"]),
-            lambda: _execute_expert_tool_call(task, tool_call, settings),
-        )
-        _merge_task_outputs(task, {"run": run_result})
-        check_result = _run_step(
-            task,
-            "check_expert_output",
-            lambda: _tool_check_expert_output(run_result),
-        )
-        _merge_task_outputs(task, {"qa": check_result})
+        tool_calls = task.outputs["tool_calls"]
+        run_result = None
+        for tool_call in tool_calls:
+            result = _run_step(
+                task,
+                str(tool_call["name"]),
+                lambda call=tool_call: _execute_expert_tool_call(task, call, settings),
+            )
+            _merge_task_outputs(task, _expert_tool_output(tool_call["name"], result))
+            if tool_call["name"] == _EXPERT_TOOL_RUN_ARCPY_CODE:
+                run_result = result
+
+        if run_result is not None:
+            check_result = _run_step(
+                task,
+                "check_expert_output",
+                lambda: _tool_check_expert_output(run_result),
+            )
+            _merge_task_outputs(task, {"qa": check_result})
         _set_task_status(task, "done", "Expert internal tool completed.")
     except Exception as exc:  # noqa: BLE001
         task.error = str(exc)
@@ -538,7 +584,7 @@ def _tool_search_remote_sensing_images(
         "bbox": map_spec["study_area"]["bbox"],
         "geometry": map_spec["study_area"].get("geometry"),
         "datetime": map_spec["basemap"].get("datetime"),
-        "limit": 10,
+        "limit": map_spec["basemap"].get("limit") or 10,
         "cloud_cover_lte": map_spec["basemap"].get("cloud_cover_lte"),
     }
     payload = {key: value for key, value in payload.items() if value is not None}
@@ -729,6 +775,23 @@ def _execute_expert_tool_call(
     settings: Any,
 ) -> Dict[str, Any]:
     normalized = _normalize_expert_tool_call(tool_call)
+    if normalized["name"] == _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES:
+        map_spec = _expert_map_spec_with_arguments(task.map_spec, normalized["arguments"])
+        _tool_validate_map_spec(map_spec)
+        return _tool_search_remote_sensing_images(map_spec, settings.data_service_url)
+
+    if normalized["name"] == _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP:
+        map_spec = _expert_map_spec_with_arguments(task.map_spec, normalized["arguments"])
+        _tool_validate_map_spec(map_spec)
+        selected_item = _expert_selected_item_for_prepare(task, normalized["arguments"])
+        result = _tool_prepare_remote_sensing_basemap(
+            map_spec,
+            selected_item,
+            settings.data_service_url,
+        )
+        _apply_prepared_dataset_to_expert_context(task, result)
+        return result
+
     if normalized["name"] == _EXPERT_TOOL_RUN_ARCPY_CODE:
         return _tool_run_arcpy_code(
             task.map_spec,
@@ -737,6 +800,56 @@ def _execute_expert_tool_call(
             task.id,
         )
     raise ValueError(f"Unknown expert tool: {normalized['name']}")
+
+
+def _expert_tool_output(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    if tool_name == _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES:
+        return {"search": result}
+    if tool_name == _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP:
+        return {"prepared_dataset": result}
+    if tool_name == _EXPERT_TOOL_RUN_ARCPY_CODE:
+        return {"run": result}
+    return {tool_name: result}
+
+
+def _expert_selected_item_for_prepare(
+    task: AgentTask,
+    arguments: Dict[str, Any],
+) -> Dict[str, Any]:
+    item_id = arguments.get("item_id")
+    if isinstance(item_id, str) and item_id.strip():
+        return {
+            "summary": f"Using requested image {item_id}.",
+            "item": {"item_id": item_id.strip()},
+        }
+
+    search_result = task.outputs.get("search")
+    if not isinstance(search_result, dict):
+        raise RuntimeError(
+            "prepare_remote_sensing_basemap needs a prior search_remote_sensing_images result "
+            "or an explicit item_id."
+        )
+    selected_item = _tool_select_best_image(search_result)
+    _merge_task_outputs(task, {"selected_item": selected_item})
+    return selected_item
+
+
+def _apply_prepared_dataset_to_expert_context(
+    task: AgentTask,
+    prepare_result: Dict[str, Any],
+) -> None:
+    dataset = prepare_result.get("dataset") or {}
+    path = dataset.get("path")
+    if not isinstance(path, str) or not path:
+        return
+
+    context = task.map_spec.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    context = {**context, "prepared_dataset_path": path}
+    task.map_spec = {**task.map_spec, "context": context}
+    task.updated_at = _now()
+    _save_task(task)
 
 
 def _tool_run_arcpy_code(
@@ -809,18 +922,20 @@ def _extract_python_code(message: str) -> Optional[str]:
     return None
 
 
-def _expert_tool_call_from_user_message(
+def _expert_tool_calls_from_user_message(
     message: str,
     context: Optional[AgentPageContext],
     settings: Any,
-) -> Dict[str, Any]:
+) -> List[Dict[str, Any]]:
     code = _extract_python_code(message)
     if code is not None:
-        return _create_run_arcpy_code_tool_call(
-            code,
-            output_format=_extract_expert_output_format(message),
-        )
-    return _generate_expert_tool_call(message, context, settings)
+        return [
+            _create_run_arcpy_code_tool_call(
+                code,
+                output_format=_extract_expert_output_format(message),
+            )
+        ]
+    return _generate_expert_tool_calls(message, context, settings)
 
 
 def _create_run_arcpy_code_tool_call(
@@ -843,6 +958,26 @@ def _create_run_arcpy_code_tool_call(
     )
 
 
+def _normalize_expert_tool_calls(
+    value: Dict[str, Any] | List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        raw_calls = value
+    elif isinstance(value, dict):
+        raw_calls = (
+            value.get("tool_calls")
+            if isinstance(value.get("tool_calls"), list)
+            else [value]
+        )
+    else:
+        raise ValueError("Expert tool call payload must be an object or list.")
+
+    calls = [_normalize_expert_tool_call(call) for call in raw_calls]
+    if not calls:
+        raise ValueError("Expert tool call payload cannot be empty.")
+    return calls
+
+
 def _normalize_expert_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     raw = tool_call
     nested = raw.get("tool_call")
@@ -854,7 +989,12 @@ def _normalize_expert_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(function, dict):
         name = name or function.get("name")
 
-    arguments = raw.get("arguments") or raw.get("input")
+    if "arguments" in raw:
+        arguments = raw.get("arguments")
+    elif "input" in raw:
+        arguments = raw.get("input")
+    else:
+        arguments = None
     if arguments is None and isinstance(function, dict):
         arguments = function.get("arguments")
     if isinstance(arguments, str):
@@ -865,9 +1005,88 @@ def _normalize_expert_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(arguments, dict):
         raise ValueError("Expert tool call must include object arguments.")
 
+    if name == _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES:
+        return {
+            "name": _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+            "arguments": _normalize_expert_search_arguments(arguments),
+        }
+
+    if name == _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP:
+        return {
+            "name": _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP,
+            "arguments": _normalize_expert_prepare_arguments(arguments),
+        }
+
     if name != _EXPERT_TOOL_RUN_ARCPY_CODE:
         raise ValueError(f"Unsupported expert tool: {name}")
 
+    return _normalize_expert_run_arcpy_arguments(arguments)
+
+
+def _normalize_expert_search_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key in ("provider", "collection", "datetime"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value.strip()
+
+    bbox = arguments.get("bbox")
+    if bbox is not None:
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            raise ValueError("search_remote_sensing_images bbox must have four numbers.")
+        normalized["bbox"] = [float(value) for value in bbox]
+
+    limit = arguments.get("limit")
+    if limit is not None:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("search_remote_sensing_images limit must be an integer.") from exc
+        if limit_value < 1 or limit_value > 100:
+            raise ValueError("search_remote_sensing_images limit must be between 1 and 100.")
+        normalized["limit"] = limit_value
+
+    cloud_cover_lte = arguments.get("cloud_cover_lte")
+    if cloud_cover_lte is not None:
+        try:
+            normalized["cloud_cover_lte"] = float(cloud_cover_lte)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "search_remote_sensing_images cloud_cover_lte must be numeric."
+            ) from exc
+    return normalized
+
+
+def _normalize_expert_prepare_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    item_id = arguments.get("item_id")
+    if isinstance(item_id, str) and item_id.strip():
+        normalized["item_id"] = item_id.strip()
+
+    bands = arguments.get("bands")
+    if bands is not None:
+        if not isinstance(bands, list) or not bands:
+            raise ValueError("prepare_remote_sensing_basemap bands must be a non-empty list.")
+        normalized["bands"] = [str(value).strip() for value in bands if str(value).strip()]
+        if not normalized["bands"]:
+            raise ValueError("prepare_remote_sensing_basemap bands must include a band name.")
+
+    target_resolution = arguments.get("target_resolution")
+    if target_resolution is not None:
+        try:
+            normalized["target_resolution"] = float(target_resolution)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "prepare_remote_sensing_basemap target_resolution must be numeric."
+            ) from exc
+
+    target_crs = arguments.get("target_crs")
+    if isinstance(target_crs, str) and target_crs.strip():
+        normalized["target_crs"] = target_crs.strip()
+    return normalized
+
+
+def _normalize_expert_run_arcpy_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
     code = arguments.get("code")
     if not isinstance(code, str) or not code.strip():
         raise ValueError("run_arcpy_code requires non-empty code.")
@@ -900,11 +1119,103 @@ def _normalize_expert_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _generate_expert_tool_call(
+def _create_expert_map_spec(
+    context: Optional[AgentPageContext],
+    tool_calls: List[Dict[str, Any]],
+    *,
+    template_id: str,
+    output_format: str,
+    dpi: int,
+) -> Dict[str, Any]:
+    context_dict = context.model_dump() if context else {}
+    bbox = context.bbox if context else []
+    geometry = context.geometry.model_dump() if context and context.geometry else None
+    basemap = {
+        "provider": context.provider if context else "mpc",
+        "collection": context.collection if context else "",
+        "datetime": context.datetime if context else None,
+        "cloud_cover_lte": context.cloud_cover_lte if context else None,
+        "limit": context.limit if context else 10,
+        "bands": context.bands if context else ["red", "green", "blue"],
+        "target_resolution": context.target_resolution if context else None,
+        "target_crs": context.target_crs if context else None,
+    }
+    map_spec = {
+        "schema_version": "0.1",
+        "map_kind": "expert_tool_call",
+        "template_id": template_id,
+        "context": context_dict,
+        "study_area": {
+            "name": context.map_title if context else None,
+            "bbox": bbox,
+            "geometry": geometry,
+        },
+        "basemap": basemap,
+        "output": {
+            "format": output_format,
+            "dpi": dpi,
+        },
+        "tool_calls": [
+            {
+                "name": call["name"],
+                "arguments": _redact_expert_tool_arguments(call["arguments"]),
+            }
+            for call in tool_calls
+        ],
+    }
+    for call in tool_calls:
+        if call["name"] in {
+            _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+            _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP,
+        }:
+            map_spec = _expert_map_spec_with_arguments(map_spec, call["arguments"])
+    return map_spec
+
+
+def _expert_map_spec_with_arguments(
+    map_spec: Dict[str, Any],
+    arguments: Dict[str, Any],
+) -> Dict[str, Any]:
+    next_spec = {
+        **map_spec,
+        "study_area": {**(map_spec.get("study_area") or {})},
+        "basemap": {**(map_spec.get("basemap") or {})},
+    }
+    if "bbox" in arguments:
+        next_spec["study_area"]["bbox"] = arguments["bbox"]
+    for key in ("provider", "collection", "datetime", "limit", "cloud_cover_lte"):
+        if key in arguments:
+            next_spec["basemap"][key] = arguments[key]
+    for key in ("bands", "target_resolution", "target_crs"):
+        if key in arguments:
+            next_spec["basemap"][key] = arguments[key]
+    return next_spec
+
+
+def _find_expert_tool_call(
+    tool_calls: List[Dict[str, Any]],
+    name: str,
+) -> Optional[Dict[str, Any]]:
+    for call in tool_calls:
+        if call["name"] == name:
+            return call
+    return None
+
+
+def _redact_expert_tool_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    redacted = dict(arguments)
+    code = redacted.pop("code", None)
+    if isinstance(code, str):
+        redacted["code_preview"] = code[:2000]
+        redacted["code_length"] = len(code)
+    return redacted
+
+
+def _generate_expert_tool_calls(
     message: str,
     context: Optional[AgentPageContext],
     settings: Any,
-) -> Dict[str, Any]:
+) -> List[Dict[str, Any]]:
     if not settings.deepseek_api_key:
         raise HTTPException(
             status_code=503,
@@ -917,11 +1228,19 @@ def _generate_expert_tool_call(
     context_json = json.dumps(context.model_dump() if context else {}, ensure_ascii=False, indent=2)
     knowledge_prompt = _expert_knowledge_prompt(message, settings)
     system_prompt = (
-        "You are an expert ArcGIS Pro ArcPy cartographer in an internal agent. Use exactly one "
-        "internal tool: run_arcpy_code. If the chat API supports tool calls, call that tool. "
-        "If tool calls are unavailable, return only a JSON object with this shape: "
+        "You are an expert ArcGIS Pro ArcPy cartographer in an internal agent. Use these "
+        "internal tools when needed: search_remote_sensing_images, prepare_remote_sensing_basemap, "
+        "and run_arcpy_code. If the user asks to make a map from remote-sensing imagery and "
+        "CONTEXT has no prepared_dataset_path, call search_remote_sensing_images first, then "
+        "prepare_remote_sensing_basemap, then run_arcpy_code. If CONTEXT already has "
+        "prepared_dataset_path, call run_arcpy_code directly unless the user asks for new data. "
+        "If the chat API supports tool calls, return the needed tool calls in order. If tool calls "
+        "are unavailable, return only a JSON object with this shape: "
+        '{"tool_calls":[{"name":"search_remote_sensing_images","arguments":{}},'
+        '{"name":"prepare_remote_sensing_basemap","arguments":{}},'
         '{"name":"run_arcpy_code","arguments":{"code":"...","output_format":"jpg","dpi":300,'
-        '"template_id":"default"}}. The code must be a complete Python script with no Markdown. '
+        '"template_id":"default"}}]}. The ArcPy code must be complete Python code with no '
+        "Markdown. "
         "The server will define APRX_PATH, OUTPUT_DIR, OUTPUT_PATH, DPI, and CONTEXT before the "
         "code runs. Use ArcPy to open APRX_PATH, modify the copied APRX according to the user "
         "request, save the APRX, and export the chosen layout to OUTPUT_PATH. Prefer "
@@ -949,16 +1268,18 @@ def _generate_expert_tool_call(
             messages=messages,
             temperature=0.1,
             tools=_EXPERT_TOOL_SCHEMAS,
-            tool_choice={"type": "function", "function": {"name": _EXPERT_TOOL_RUN_ARCPY_CODE}},
+            tool_choice="auto",
         )
-        return _parse_expert_tool_call_message(completion_message)
+        tool_calls = _parse_expert_tool_call_message(completion_message)
+        return _complete_expert_tool_calls(message, context, tool_calls, settings)
     except HTTPException as exc:
         if exc.status_code not in {400, 422}:
             raise
 
     fallback_content = _deepseek_chat(settings=settings, messages=messages, temperature=0.1)
     try:
-        return _parse_expert_tool_call_content(fallback_content)
+        tool_calls = _parse_expert_tool_call_content(fallback_content)
+        return _complete_expert_tool_calls(message, context, tool_calls, settings)
     except ValueError as exc:
         raise HTTPException(
             status_code=502,
@@ -966,8 +1287,9 @@ def _generate_expert_tool_call(
         ) from exc
 
 
-def _parse_expert_tool_call_message(message: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_expert_tool_call_message(message: Dict[str, Any]) -> List[Dict[str, Any]]:
     tool_calls = message.get("tool_calls") or []
+    parsed_calls = []
     if isinstance(tool_calls, list):
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
@@ -975,22 +1297,24 @@ def _parse_expert_tool_call_message(message: Dict[str, Any]) -> Dict[str, Any]:
             function = tool_call.get("function")
             if not isinstance(function, dict):
                 continue
-            if function.get("name") != _EXPERT_TOOL_RUN_ARCPY_CODE:
-                continue
-            return _normalize_expert_tool_call(
-                {
-                    "name": function.get("name"),
-                    "arguments": function.get("arguments") or {},
-                }
+            parsed_calls.append(
+                _normalize_expert_tool_call(
+                    {
+                        "name": function.get("name"),
+                        "arguments": function.get("arguments") or {},
+                    }
+                )
             )
+    if parsed_calls:
+        return parsed_calls
 
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return _parse_expert_tool_call_content(content)
-    raise HTTPException(status_code=502, detail="DeepSeek did not return an expert tool call.")
+    raise HTTPException(status_code=502, detail="DeepSeek did not return expert tool calls.")
 
 
-def _parse_expert_tool_call_content(content: str) -> Dict[str, Any]:
+def _parse_expert_tool_call_content(content: str) -> List[Dict[str, Any]]:
     stripped = content.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.IGNORECASE | re.DOTALL)
     if fence:
@@ -1007,7 +1331,167 @@ def _parse_expert_tool_call_content(content: str) -> Dict[str, Any]:
         raise ValueError("JSON object could not be decoded.") from exc
     if not isinstance(payload, dict):
         raise ValueError("Tool call payload must be a JSON object.")
-    return _normalize_expert_tool_call(payload)
+    return _normalize_expert_tool_calls(payload)
+
+
+def _complete_expert_tool_calls(
+    message: str,
+    context: Optional[AgentPageContext],
+    tool_calls: List[Dict[str, Any]],
+    settings: Any,
+) -> List[Dict[str, Any]]:
+    completed = list(tool_calls)
+    names = _expert_tool_names(completed)
+    needs_search = _expert_message_requests_search(message)
+    needs_prepare = _expert_message_requests_prepare(message)
+    needs_run = _expert_message_requests_map_output(message)
+    has_prepared_dataset = _expert_context_has_prepared_dataset(context)
+
+    if needs_search and _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES not in names:
+        completed.insert(
+            0,
+            {
+                "name": _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+                "arguments": {},
+            },
+        )
+        names = _expert_tool_names(completed)
+
+    if (
+        (needs_prepare or (needs_run and not has_prepared_dataset))
+        and _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP not in names
+    ):
+        insert_at = _expert_insert_index_after(
+            completed,
+            _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+        )
+        completed.insert(
+            insert_at,
+            {
+                "name": _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP,
+                "arguments": {},
+            },
+        )
+        names = _expert_tool_names(completed)
+
+    if needs_run and _EXPERT_TOOL_RUN_ARCPY_CODE not in names:
+        completed.append(_generate_expert_run_arcpy_tool_call(message, context, settings))
+
+    return _normalize_expert_tool_calls(completed)
+
+
+def _generate_expert_run_arcpy_tool_call(
+    message: str,
+    context: Optional[AgentPageContext],
+    settings: Any,
+) -> Dict[str, Any]:
+    context_json = json.dumps(context.model_dump() if context else {}, ensure_ascii=False, indent=2)
+    knowledge_prompt = _expert_knowledge_prompt(message, settings)
+    system_prompt = (
+        "You are an expert ArcGIS Pro ArcPy cartographer. Generate one complete Python script, "
+        "with no Markdown fences and no explanation. The server will define APRX_PATH, "
+        "OUTPUT_DIR, OUTPUT_PATH, DPI, and CONTEXT. Previous data tools may inject "
+        "CONTEXT['prepared_dataset_path'] before this script runs. If prepared_dataset_path is "
+        "present, add that raster to the first map, set the first layout map frame extent to the "
+        "added layer extent with about 8 percent padding, apply requested title/layout changes, "
+        "save the APRX, and export the first layout to OUTPUT_PATH. The script must create "
+        "OUTPUT_PATH.\n\n"
+        "Use this project knowledge as authoritative runtime guidance:\n\n"
+        f"{knowledge_prompt}"
+    )
+    user_prompt = (
+        f"User map request:\n{message}\n\n"
+        f"Current web map context JSON:\n{context_json}\n\n"
+        "Return only executable Python code."
+    )
+    response = _deepseek_chat(
+        settings=settings,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+    )
+    code = _extract_python_code(response) or response.strip()
+    if not code:
+        raise HTTPException(status_code=502, detail="DeepSeek returned empty ArcPy code.")
+    return _create_run_arcpy_code_tool_call(
+        code,
+        output_format=_extract_expert_output_format(message),
+    )
+
+
+def _expert_tool_names(tool_calls: List[Dict[str, Any]]) -> set[str]:
+    return {str(call.get("name") or "") for call in tool_calls}
+
+
+def _expert_insert_index_after(tool_calls: List[Dict[str, Any]], tool_name: str) -> int:
+    for index, call in enumerate(tool_calls):
+        if call.get("name") == tool_name:
+            return index + 1
+    return len(tool_calls)
+
+
+def _expert_context_has_prepared_dataset(context: Optional[AgentPageContext]) -> bool:
+    return bool(context and context.prepared_dataset_path)
+
+
+def _expert_message_requests_search(message: str) -> bool:
+    return _expert_message_has_any(
+        message,
+        (
+            "search",
+            "find",
+            "query",
+            "remote sensing",
+            "\u641c\u7d22",
+            "\u67e5\u627e",
+            "\u67e5\u8be2",
+            "\u9065\u611f",
+            "\u5f71\u50cf",
+        ),
+    )
+
+
+def _expert_message_requests_prepare(message: str) -> bool:
+    return _expert_message_has_any(
+        message,
+        (
+            "prepare",
+            "raster",
+            "basemap",
+            "rgb",
+            "\u51c6\u5907",
+            "\u6805\u683c",
+            "\u5e95\u56fe",
+        ),
+    )
+
+
+def _expert_message_requests_map_output(message: str) -> bool:
+    return _expert_message_has_any(
+        message,
+        (
+            "map",
+            "export",
+            "jpg",
+            "jpeg",
+            "png",
+            "pdf",
+            "title",
+            "\u5236\u4f5c",
+            "\u751f\u6210",
+            "\u5236\u56fe",
+            "\u5730\u56fe",
+            "\u5bfc\u51fa",
+            "\u6807\u9898",
+        ),
+    )
+
+
+def _expert_message_has_any(message: str, patterns: tuple[str, ...]) -> bool:
+    lowered = message.lower()
+    return any(pattern in lowered for pattern in patterns)
 
 
 def _extract_expert_output_format(message: str) -> str:
@@ -1120,7 +1604,7 @@ def _deepseek_chat_completion(
     messages: List[Dict[str, str]],
     temperature: float,
     tools: Optional[List[Dict[str, Any]]] = None,
-    tool_choice: Optional[Dict[str, Any]] = None,
+    tool_choice: Optional[Any] = None,
 ) -> Dict[str, Any]:
     request_payload: Dict[str, Any] = {
         "model": settings.deepseek_model,
