@@ -83,6 +83,7 @@ export function App() {
   const [mapTitle, setMapTitle] = useState("Landsat Map");
   const [layoutName, setLayoutName] = useState("Layout");
   const [dryRun, setDryRun] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<SearchItem | null>(null);
   const [previewLayers, setPreviewLayers] = useState<PreviewRasterLayer[]>([]);
   const [prepareJobId, setPrepareJobId] = useState<string | null>(null);
@@ -129,6 +130,7 @@ export function App() {
         });
     },
     onSuccess: (response) => {
+      setSearchResults(response.items);
       setSelectedItem(response.items[0] ?? null);
       setPreviewLayers([]);
       setPrepareJobId(null);
@@ -251,7 +253,7 @@ export function App() {
       isTerminal(query.state.data?.status) ? false : 2000,
   });
 
-  const items = searchMutation.data?.items ?? [];
+  const items = searchResults;
   const canPrepare = Boolean(selectedItem) && !prepareMutation.isPending;
   const canRender =
     dryRun ||
@@ -500,7 +502,16 @@ export function App() {
             onPolygonChange={setPolygonCoordinates}
           />
         </section>
-      <ChatPanel context={agentContext} />
+      <ChatPanel
+        context={agentContext}
+        onSearchResults={(nextItems) => {
+          setSearchResults(nextItems);
+          setSelectedItem(nextItems[0] ?? null);
+          setPreviewLayers([]);
+          setPrepareJobId(null);
+          setRenderJobId(null);
+        }}
+      />
       </section>
     </main>
   );
@@ -945,11 +956,18 @@ function MapPanel({
   );
 }
 
-function ChatPanel({ context }: { context: AgentPageContext }) {
+function ChatPanel({
+  context,
+  onSearchResults,
+}: {
+  context: AgentPageContext;
+  onSearchResults: (items: SearchItem[]) => void;
+}) {
   const [agentMode, setAgentMode] = useState<"workflow" | "expert">("workflow");
   const [draft, setDraft] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [reportedTaskId, setReportedTaskId] = useState<string | null>(null);
+  const reportedSearchResultsRef = useRef<string | null>(null);
   const [messages, setMessages] = useState<AiChatMessage[]>([
     {
       role: "assistant",
@@ -1006,6 +1024,20 @@ function ChatPanel({ context }: { context: AgentPageContext }) {
       },
     ]);
   }, [activeTask.data, reportedTaskId]);
+
+  useEffect(() => {
+    const task = activeTask.data;
+    const searchItems = extractAgentSearchItems(task);
+    if (!task || searchItems.length === 0) {
+      return;
+    }
+    const signature = `${task.id}:${searchItems.map((item) => item.item_id).join(",")}`;
+    if (reportedSearchResultsRef.current === signature) {
+      return;
+    }
+    reportedSearchResultsRef.current = signature;
+    onSearchResults(searchItems);
+  }, [activeTask.data, onSearchResults]);
 
   const submitMessage = () => {
     const content = draft.trim();
@@ -1356,6 +1388,21 @@ function extractPreparedPath(job?: JobRecord): string | undefined {
 function extractPreviewPath(job?: JobRecord): string | undefined {
   const files = job?.result?.files as { preview?: unknown } | undefined;
   return typeof files?.preview === "string" ? files.preview : undefined;
+}
+
+function extractAgentSearchItems(task?: AgentTask): SearchItem[] {
+  const search = isRecord(task?.outputs.search) ? task.outputs.search : undefined;
+  const rawItems = Array.isArray(search?.items) ? search.items : [];
+  return rawItems.flatMap((item) => {
+    if (!isRecord(item) || typeof item.item_id !== "string") {
+      return [];
+    }
+    return [item as unknown as SearchItem];
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function formatItemMeta(item: SearchItem): string {
