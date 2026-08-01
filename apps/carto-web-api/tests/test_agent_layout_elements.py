@@ -5,6 +5,9 @@ from app.agents.cartography.skills.data_acquisition import (
     build_search_payload,
 )
 from app.agents.cartography.skills.cartographic_standards import build_text_styles_from_request
+from app.agents.cartography.skills.cartographic_standards import (
+    build_layout_element_positions_from_request,
+)
 from app.agents.cartography.skills.remote_sensing_basemap import build_prepare_payload
 from app.api.routes.agent import (
     AgentPageContext,
@@ -221,6 +224,39 @@ def test_cartographic_standards_skill_builds_title_text_style() -> None:
     ]
 
 
+def test_cartographic_standards_skill_builds_layout_positions() -> None:
+    layout_elements = build_layout_element_positions_from_request(
+        "标题位置 x=7 y=5.2，比例尺位置 x=6 y=3，指北针位置 x=2 y=2"
+    )
+
+    assert layout_elements == [
+        {"element_name": "Title", "x": 7.0, "y": 5.2, "units": "inch"},
+        {"element_name": "比例尺", "x": 6.0, "y": 3.0, "units": "inch"},
+        {"element_name": "zbz", "x": 2.0, "y": 2.0, "units": "inch"},
+    ]
+
+
+def test_cartographic_standards_skill_builds_anchor_positions_with_offsets() -> None:
+    layout_elements = build_layout_element_positions_from_request(
+        "比例尺放到左下角，往上移动1厘米。指北针放到右上角，往左移动0.5厘米"
+    )
+
+    assert layout_elements == [
+        {
+            "element_name": "比例尺",
+            "anchor": "bottom_left",
+            "offset_y": 1.0,
+            "units": "centimeter",
+        },
+        {
+            "element_name": "zbz",
+            "anchor": "top_right",
+            "offset_x": -0.5,
+            "units": "centimeter",
+        },
+    ]
+
+
 def test_complete_expert_tool_calls_applies_cartographic_standards(monkeypatch) -> None:
     context = AgentPageContext(
         collection="landsat-c2-l2",
@@ -250,6 +286,65 @@ def test_complete_expert_tool_calls_applies_cartographic_standards(monkeypatch) 
             "font_style": "Bold",
             "required": True,
         }
+    ]
+
+
+def test_complete_expert_tool_calls_applies_layout_positions(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        prepared_dataset_path="C:\\data-service\\cache\\prepared\\demo.tif",
+    )
+
+    monkeypatch.setattr(
+        "app.api.routes.agent._generate_expert_run_arcpy_tool_call",
+        lambda message, context, settings: _create_run_arcpy_code_tool_call("print('ok')"),
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "生成地图，标题位置 x=7 y=5.2，比例尺位置 x=6 y=3，指北针位置 x=2 y=2",
+        context,
+        [],
+        object(),
+    )
+
+    run_call = tool_calls[-1]
+    assert run_call["arguments"]["layout_elements"] == [
+        {"element_name": "Title", "x": 7.0, "y": 5.2, "units": "inch"},
+        {"element_name": "比例尺", "x": 6.0, "y": 3.0, "units": "inch"},
+        {"element_name": "zbz", "x": 2.0, "y": 2.0, "units": "inch"},
+    ]
+
+
+def test_complete_expert_tool_calls_applies_anchor_positions(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        prepared_dataset_path="C:\\data-service\\cache\\prepared\\demo.tif",
+    )
+
+    monkeypatch.setattr(
+        "app.api.routes.agent._generate_expert_run_arcpy_tool_call",
+        lambda message, context, settings: _create_run_arcpy_code_tool_call("print('ok')"),
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "生成地图，标题放到上方居中，比例尺放到左下角，往上移动1厘米，指北针放到右上角",
+        context,
+        [],
+        object(),
+    )
+
+    run_call = tool_calls[-1]
+    assert run_call["arguments"]["layout_elements"] == [
+        {"element_name": "Title", "anchor": "top_center", "units": "inch"},
+        {
+            "element_name": "比例尺",
+            "anchor": "bottom_left",
+            "offset_y": 1.0,
+            "units": "centimeter",
+        },
+        {"element_name": "zbz", "anchor": "top_right", "units": "inch"},
     ]
 
 

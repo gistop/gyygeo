@@ -327,10 +327,22 @@ def _layout_element_xy(
     element: Any,
     position: LayoutElementPosition,
 ) -> tuple[float, float]:
+    layout_units = _layout_page_units(layout)
+    value_units = position.units or layout_units
+    offset_x, offset_y = _convert_page_size(
+        (position.offset_x, position.offset_y),
+        from_units=value_units,
+        to_units=layout_units,
+    )
     if position.anchor is None:
         if position.x is None or position.y is None:
             raise ValueError("Absolute layout element positions require both x and y.")
-        return position.x + position.offset_x, position.y + position.offset_y
+        x, y = _convert_page_size(
+            (position.x, position.y),
+            from_units=value_units,
+            to_units=layout_units,
+        )
+        return x + offset_x, y + offset_y
 
     page_width = _layout_number(layout, "pageWidth")
     page_height = _layout_number(layout, "pageHeight")
@@ -358,7 +370,7 @@ def _layout_element_xy(
     else:
         raise ValueError(f"Unsupported layout element anchor: {position.anchor}")
 
-    return x + position.offset_x, y + position.offset_y
+    return x + offset_x, y + offset_y
 
 
 def _layout_number(element: Any, attribute: str) -> float:

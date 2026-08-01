@@ -8,6 +8,7 @@ import pytest
 from app.arcpy_engine.code_runner import _typography_postprocess_source
 from app.arcpy_engine.typography import apply_text_typography_operations
 from app.arcpy_engine.worker import _apply_layout_element_positions, _apply_layout_page
+from app.schemas.arcpy_code import ArcPyCodeRequest
 from app.schemas.project import LayoutElementPosition, LayoutPage, RenderPreviewRequest, TextTypography
 
 
@@ -173,6 +174,19 @@ def test_layout_element_absolute_position() -> None:
     assert scale_bar.elementPositionY == 1.1
 
 
+def test_layout_element_absolute_position_converts_units() -> None:
+    scale_bar = FakeElement("比例尺", width=2.0, height=0.3, element_type="MAPSURROUND_ELEMENT")
+    layout = FakeLayout([scale_bar])
+
+    _apply_layout_element_positions(
+        layout,
+        [LayoutElementPosition(element_name="比例尺", x=1.0, y=2.0, units="inch")],
+    )
+
+    assert scale_bar.elementPositionX == pytest.approx(2.54)
+    assert scale_bar.elementPositionY == pytest.approx(5.08)
+
+
 def test_layout_element_finds_group_child() -> None:
     north_arrow = FakeElement("zbj", width=1.0, height=1.0, element_type="MAPSURROUND_ELEMENT")
     group = FakeElement("Surrounds", width=3.0, height=3.0, element_type="GROUP_ELEMENT", children=[north_arrow])
@@ -301,6 +315,24 @@ def test_render_request_accepts_text_styles() -> None:
     assert request.project.text_styles[0].font_size == 6
 
 
+def test_arcpy_code_request_accepts_layout_elements() -> None:
+    request = ArcPyCodeRequest(
+        code="print('ok')",
+        layout_elements=[
+            {
+                "element_name": "Title",
+                "x": 7.0,
+                "y": 5.2,
+                "units": "inch",
+            }
+        ],
+    )
+
+    assert request.layout_elements[0].element_name == "Title"
+    assert request.layout_elements[0].x == 7.0
+    assert request.layout_elements[0].units == "inch"
+
+
 def test_typography_postprocess_source_imports_engine_typography() -> None:
     source = _typography_postprocess_source(
         base_dir=Path("C:/app"),
@@ -315,7 +347,17 @@ def test_typography_postprocess_source_imports_engine_typography() -> None:
                 "font_size": 6,
             }
         ],
+        layout_elements=[
+            {
+                "element_name": "Title",
+                "x": 7.0,
+                "y": 5.2,
+                "units": "inch",
+            }
+        ],
     )
 
     assert "from app.arcpy_engine.typography import apply_text_typography_operations" in source
+    assert "from app.arcpy_engine.worker import _apply_layout_element_positions" in source
+    assert "layout_elements = [LayoutElementPosition(**item) for item in LAYOUT_ELEMENTS]" in source
     assert "layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)" in source

@@ -53,6 +53,7 @@ LayoutAnchor = Literal[
     "top_center",
     "top_right",
 ]
+LayoutUnits = Literal["millimeter", "centimeter", "inch"]
 
 
 class LayoutElementPosition(BaseModel):
@@ -62,6 +63,7 @@ class LayoutElementPosition(BaseModel):
     y: Optional[float] = None
     offset_x: float = 0.0
     offset_y: float = 0.0
+    units: Optional[LayoutUnits] = None
 
     @model_validator(mode="after")
     def validate_position(self) -> "LayoutElementPosition":
@@ -76,7 +78,7 @@ class LayoutElementPosition(BaseModel):
 
 PageSizeName = Literal["a0", "a1", "a2", "a3", "a4", "letter", "legal"]
 PageOrientation = Literal["portrait", "landscape"]
-PageUnits = Literal["millimeter", "centimeter", "inch"]
+PageUnits = LayoutUnits
 
 
 class LayoutPage(BaseModel):

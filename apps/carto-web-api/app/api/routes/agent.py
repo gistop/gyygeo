@@ -180,6 +180,44 @@ _EXPERT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                             "additionalProperties": False,
                         },
                     },
+                    "layout_elements": {
+                        "type": "array",
+                        "description": (
+                            "Optional structured layout element position operations executed by "
+                            "carto-engine after the generated ArcPy code. Use for stable element "
+                            "moves such as Title, 比例尺, and zbz."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "element_name": {"type": "string"},
+                                "anchor": {
+                                    "type": "string",
+                                    "enum": [
+                                        "bottom_left",
+                                        "bottom_center",
+                                        "bottom_right",
+                                        "middle_left",
+                                        "center",
+                                        "middle_right",
+                                        "top_left",
+                                        "top_center",
+                                        "top_right",
+                                    ],
+                                },
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "offset_x": {"type": "number", "default": 0},
+                                "offset_y": {"type": "number", "default": 0},
+                                "units": {
+                                    "type": "string",
+                                    "enum": ["millimeter", "centimeter", "inch"],
+                                },
+                            },
+                            "required": ["element_name"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["code"],
                 "additionalProperties": False,
@@ -999,6 +1037,7 @@ def _execute_expert_tool_call(
             settings,
             task.id,
             text_styles=normalized["arguments"].get("text_styles") or [],
+            layout_elements=normalized["arguments"].get("layout_elements") or [],
         )
     raise ValueError(f"Unknown expert tool: {normalized['name']}")
 
@@ -1059,6 +1098,7 @@ def _tool_run_arcpy_code(
     task_id: str,
     *,
     text_styles: List[Dict[str, Any]],
+    layout_elements: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     output = map_spec.get("output") or {}
     code = _ensure_prepared_dataset_loaded(code, map_spec)
@@ -1070,6 +1110,7 @@ def _tool_run_arcpy_code(
         "output_format": output.get("format") or "jpg",
         "dpi": output.get("dpi") or 300,
         "text_styles": text_styles,
+        "layout_elements": layout_elements,
         "context": map_spec.get("context") or {},
         "metadata": {
             "agent_task_id": task_id,
@@ -1152,6 +1193,7 @@ def _create_run_arcpy_code_tool_call(
     dpi: int = 300,
     template_id: str = "default",
     text_styles: Optional[List[Dict[str, Any]]] = None,
+    layout_elements: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     arguments: Dict[str, Any] = {
         "code": code,
@@ -1161,6 +1203,8 @@ def _create_run_arcpy_code_tool_call(
     }
     if text_styles:
         arguments["text_styles"] = text_styles
+    if layout_elements:
+        arguments["layout_elements"] = layout_elements
     return _normalize_expert_tool_call(
         {
             "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
@@ -1328,6 +1372,9 @@ def _normalize_expert_run_arcpy_arguments(arguments: Dict[str, Any]) -> Dict[str
     text_styles = _normalize_text_styles(arguments.get("text_styles"))
     if text_styles:
         normalized_arguments["text_styles"] = text_styles
+    layout_elements = _normalize_layout_elements(arguments.get("layout_elements"))
+    if layout_elements:
+        normalized_arguments["layout_elements"] = layout_elements
 
     return {
         "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
@@ -1378,6 +1425,74 @@ def _normalize_text_styles(value: Any) -> List[Dict[str, Any]]:
             )
         styles.append(style)
     return styles
+
+
+def _normalize_layout_elements(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("run_arcpy_code layout_elements must be a list.")
+
+    allowed_anchors = {
+        "bottom_left",
+        "bottom_center",
+        "bottom_right",
+        "middle_left",
+        "center",
+        "middle_right",
+        "top_left",
+        "top_center",
+        "top_right",
+    }
+    allowed_units = {"millimeter", "centimeter", "inch"}
+    elements = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Each run_arcpy_code layout element must be an object.")
+        element_name = item.get("element_name")
+        if not isinstance(element_name, str) or not element_name.strip():
+            raise ValueError("Each run_arcpy_code layout element requires element_name.")
+        element: Dict[str, Any] = {"element_name": element_name.strip()}
+
+        anchor = item.get("anchor")
+        if anchor is not None:
+            anchor_value = str(anchor).strip().lower()
+            if anchor_value not in allowed_anchors:
+                raise ValueError(f"Unsupported run_arcpy_code layout element anchor: {anchor}")
+            element["anchor"] = anchor_value
+
+        has_x = item.get("x") is not None
+        has_y = item.get("y") is not None
+        if has_x != has_y:
+            raise ValueError("run_arcpy_code layout element requires both x and y.")
+        if has_x and has_y:
+            element["x"] = _coerce_float(item.get("x"), "run_arcpy_code layout element x")
+            element["y"] = _coerce_float(item.get("y"), "run_arcpy_code layout element y")
+
+        if "anchor" in element and ("x" in element or "y" in element):
+            raise ValueError("Use either anchor or x/y for a run_arcpy_code layout element.")
+        if "anchor" not in element and ("x" not in element or "y" not in element):
+            raise ValueError("run_arcpy_code layout element requires either anchor or both x and y.")
+
+        for key in ("offset_x", "offset_y"):
+            if item.get(key) is not None:
+                element[key] = _coerce_float(item.get(key), f"run_arcpy_code layout element {key}")
+
+        units = item.get("units")
+        if units is not None:
+            units_value = str(units).strip().lower()
+            if units_value not in allowed_units:
+                raise ValueError(f"Unsupported run_arcpy_code layout element units: {units}")
+            element["units"] = units_value
+        elements.append(element)
+    return elements
+
+
+def _coerce_float(value: Any, field_name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be numeric.") from exc
 
 
 class _CreateTextElementRepairer(ast.NodeTransformer):
@@ -1668,6 +1783,12 @@ def _generate_expert_tool_calls(
         "For text typography such as title font family, font size, or font style, prefer the "
         "run_arcpy_code text_styles argument instead of hand-writing ArcPy typography code. "
         "Use element_name such as Title when the target layout text element is known.\n\n"
+        "For layout element positions such as title, scale bar, or north arrow x/y placement, "
+        "prefer the run_arcpy_code layout_elements argument instead of hand-writing ArcPy "
+        "elementPositionX/Y code. Use Title for the title, 比例尺 for the scale bar, and zbz "
+        "for the north arrow when those template element names are requested. For natural "
+        "positions, use layout_elements anchor values such as bottom_left, top_right, or "
+        "top_center, with offset_x/offset_y and units for requests such as moving up 1 cm.\n\n"
         "Use the following project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -1824,7 +1945,11 @@ def _generate_expert_run_arcpy_tool_call(
         "added layer extent with about 8 percent padding, apply requested title/layout changes, "
         "save the APRX, and export the first layout to OUTPUT_PATH. The script must create "
         "OUTPUT_PATH. For text typography such as title font family, font size, or font style, "
-        "prefer the run_arcpy_code text_styles argument when returning tool calls.\n\n"
+        "prefer the run_arcpy_code text_styles argument when returning tool calls. For layout "
+        "element positions such as title, scale bar, or north arrow x/y placement, prefer the "
+        "run_arcpy_code layout_elements argument when returning tool calls. Natural positions "
+        "should use anchors such as bottom_left, top_right, or top_center, with offset_x/offset_y "
+        "and units for requests such as moving up 1 cm.\n\n"
         "Use this project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )

@@ -2,6 +2,20 @@
   "skill_id": "cartographic_standards",
   "display_name": "Cartographic Standards Skill",
   "title_element_name": "Title",
+  "default_position_units": "inch",
+  "layout_element_aliases": {
+    "标题": "Title",
+    "题名": "Title",
+    "图名": "Title",
+    "title": "Title",
+    "比例尺": "比例尺",
+    "scale bar": "比例尺",
+    "scalebar": "比例尺",
+    "指北针": "zbz",
+    "北箭头": "zbz",
+    "north arrow": "zbz",
+    "zbz": "zbz"
+  },
   "font_family_aliases": {
     "times new roman": "Times New Roman",
     "微软雅黑": "Microsoft YaHei",

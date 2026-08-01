@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from app.schemas.project import TextTypography
+from app.schemas.project import LayoutElementPosition, TextTypography
 
 
 class ArcPyCodeRequest(BaseModel):
@@ -15,5 +15,6 @@ class ArcPyCodeRequest(BaseModel):
     output_format: Literal["jpg", "png", "pdf"] = "jpg"
     dpi: int = Field(default=300, ge=72, le=600)
     text_styles: List[TextTypography] = Field(default_factory=list)
+    layout_elements: List[LayoutElementPosition] = Field(default_factory=list)
     context: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
