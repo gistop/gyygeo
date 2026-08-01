@@ -28,6 +28,20 @@ class LayoutText(BaseModel):
     text: str
 
 
+class TextTypography(BaseModel):
+    element_name: str = Field(..., min_length=1)
+    font_family: Optional[str] = Field(default=None, min_length=1)
+    font_size: Optional[float] = Field(default=None, gt=0.0)
+    font_style: Optional[str] = Field(default=None, min_length=1)
+    required: bool = True
+
+    @model_validator(mode="after")
+    def validate_typography(self) -> "TextTypography":
+        if self.font_family is None and self.font_size is None and self.font_style is None:
+            raise ValueError("Text typography requires font_family, font_size, or font_style.")
+        return self
+
+
 LayoutAnchor = Literal[
     "bottom_left",
     "bottom_center",
@@ -119,6 +133,7 @@ class MapProjectConfig(BaseModel):
     fit_layer_names: List[str] = Field(default_factory=list)
     fit_padding: float = Field(default=0.08, ge=0.0, le=1.0)
     layout_text: List[LayoutText] = Field(default_factory=list)
+    text_styles: List[TextTypography] = Field(default_factory=list)
     layout_elements: List[LayoutElementPosition] = Field(default_factory=list)
     page: Optional[LayoutPage] = None
     export: ExportOptions = Field(default_factory=ExportOptions)

@@ -1,0 +1,14 @@
+{
+  "skill_id": "remote_sensing_basemap",
+  "display_name": "Remote Sensing Basemap Skill",
+  "default_bands": ["red", "green", "blue"],
+  "default_target_crs": "EPSG:3857",
+  "default_target_resolution": 30,
+  "bbox_crs": "EPSG:4326",
+  "output_format": "geotiff",
+  "output_purpose": "carto-render",
+  "requested_by": "gyygeo-agent",
+  "prepare_strategy": "mpc_dynamic_tiles",
+  "layer_name": "Prepared Remote Sensing Basemap"
+}
+

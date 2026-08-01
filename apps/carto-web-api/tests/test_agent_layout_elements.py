@@ -1,5 +1,11 @@
 ﻿from __future__ import annotations
 
+from app.agents.cartography.skills.data_acquisition import (
+    build_pending_image_selection,
+    build_search_payload,
+)
+from app.agents.cartography.skills.cartographic_standards import build_text_styles_from_request
+from app.agents.cartography.skills.remote_sensing_basemap import build_prepare_payload
 from app.api.routes.agent import (
     AgentPageContext,
     _complete_expert_tool_calls,
@@ -7,11 +13,15 @@ from app.api.routes.agent import (
     _create_expert_task,
     _create_task,
     _execute_expert_tool_call,
+    _ensure_prepared_dataset_loaded,
     _extract_layout_elements,
     _extract_layout_page,
     _is_supported_agent_request,
+    _normalize_expert_tool_call,
     _parse_expert_tool_call_content,
+    _repair_generated_arcpy_code,
     _tool_render_research_area_overview_map,
+    _tool_call_with_selected_item,
 )
 
 
@@ -169,6 +179,80 @@ def test_parse_expert_tool_call_content_accepts_json_wrapper() -> None:
     ]
 
 
+def test_normalize_expert_run_arcpy_accepts_text_styles() -> None:
+    tool_call = _normalize_expert_tool_call(
+        {
+            "name": "run_arcpy_code",
+            "arguments": {
+                "code": "print('ok')",
+                "text_styles": [
+                    {
+                        "element_name": "Title",
+                        "font_family": "Times New Roman",
+                        "font_size": "6",
+                        "font_style": "Bold",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert tool_call["arguments"]["text_styles"] == [
+        {
+            "element_name": "Title",
+            "font_family": "Times New Roman",
+            "font_style": "Bold",
+            "font_size": 6.0,
+        }
+    ]
+
+
+def test_cartographic_standards_skill_builds_title_text_style() -> None:
+    text_styles = build_text_styles_from_request("生成地图，标题字体 Times New Roman，字号 6，加粗")
+
+    assert text_styles == [
+        {
+            "element_name": "Title",
+            "font_family": "Times New Roman",
+            "font_size": 6.0,
+            "font_style": "Bold",
+            "required": True,
+        }
+    ]
+
+
+def test_complete_expert_tool_calls_applies_cartographic_standards(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        prepared_dataset_path="C:\\data-service\\cache\\prepared\\demo.tif",
+    )
+
+    monkeypatch.setattr(
+        "app.api.routes.agent._generate_expert_run_arcpy_tool_call",
+        lambda message, context, settings: _create_run_arcpy_code_tool_call("print('ok')"),
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "生成该区域的遥感影像地图，标题为 waamj，输出 jpg，标题字体 Times New Roman，字号 6，加粗",
+        context,
+        [],
+        object(),
+    )
+
+    run_call = tool_calls[-1]
+    assert run_call["name"] == "run_arcpy_code"
+    assert run_call["arguments"]["text_styles"] == [
+        {
+            "element_name": "Title",
+            "font_family": "Times New Roman",
+            "font_size": 6.0,
+            "font_style": "Bold",
+            "required": True,
+        }
+    ]
+
+
 def test_create_expert_task_can_queue_search_prepare_and_run() -> None:
     context = AgentPageContext(
         collection="landsat-c2-l2",
@@ -187,6 +271,7 @@ def test_create_expert_task_can_queue_search_prepare_and_run() -> None:
 
     assert [step.name for step in task.steps] == [
         "search_remote_sensing_images",
+        "select_remote_sensing_image",
         "prepare_remote_sensing_basemap",
         "run_arcpy_code",
         "check_expert_output",
@@ -218,6 +303,66 @@ def test_complete_expert_tool_calls_backfills_prepare_and_run(monkeypatch) -> No
         "prepare_remote_sensing_basemap",
         "run_arcpy_code",
     ]
+
+
+def test_data_acquisition_skill_builds_search_payload_and_pending_action() -> None:
+    payload = build_search_payload(
+        {
+            "study_area": {
+                "bbox": [100.0, 20.0, 101.0, 21.0],
+                "geometry": None,
+            },
+            "basemap": {
+                "provider": "mpc",
+                "collection": "landsat-c2-l2",
+                "datetime": "2025-03-01/2025-05-31",
+                "limit": 500,
+                "cloud_cover_lte": 20,
+            },
+        }
+    )
+    pending_action = build_pending_image_selection(
+        {"item": {"item_id": "image-1"}, "summary": "Recommended image image-1."}
+    )
+
+    assert payload == {
+        "provider": "mpc",
+        "collection": "landsat-c2-l2",
+        "bbox": [100.0, 20.0, 101.0, 21.0],
+        "datetime": "2025-03-01/2025-05-31",
+        "limit": 100,
+        "cloud_cover_lte": 20.0,
+    }
+    assert pending_action == {
+        "type": "select_image",
+        "message": "Select one candidate image to continue the expert map task.",
+        "recommended_item_id": "image-1",
+    }
+
+
+def test_remote_sensing_basemap_skill_builds_prepare_payload() -> None:
+    payload = build_prepare_payload(
+        {
+            "map_kind": "expert_tool_call",
+            "study_area": {
+                "bbox": [100.0, 20.0, 101.0, 21.0],
+                "geometry": None,
+            },
+            "basemap": {
+                "provider": "mpc",
+                "collection": "landsat-c2-l2",
+                "bands": ["red", "green", "blue"],
+                "target_resolution": 30,
+                "target_crs": "EPSG:3857",
+            },
+        },
+        {"item": {"item_id": "image-2"}},
+    )
+
+    assert payload["item_id"] == "image-2"
+    assert payload["bbox_crs"] == "EPSG:4326"
+    assert payload["output"] == {"format": "geotiff", "purpose": "carto-render"}
+    assert payload["metadata"]["skill_id"] == "remote_sensing_basemap"
 
 
 def test_expert_prepare_tool_updates_context_with_prepared_dataset(monkeypatch) -> None:
@@ -273,6 +418,60 @@ def test_expert_prepare_tool_updates_context_with_prepared_dataset(monkeypatch) 
 
     assert prepare_result["dataset"]["path"] == "C:\\data\\demo.tif"
     assert task.map_spec["context"]["prepared_dataset_path"] == "C:\\data\\demo.tif"
+
+
+def test_prepare_tool_call_uses_user_selected_image() -> None:
+    tool_call = {
+        "name": "prepare_remote_sensing_basemap",
+        "arguments": {"bands": ["red", "green", "blue"]},
+    }
+
+    next_call = _tool_call_with_selected_item(tool_call, "user-image-2")
+
+    assert next_call["arguments"]["item_id"] == "user-image-2"
+    assert next_call["arguments"]["bands"] == ["red", "green", "blue"]
+
+
+def test_repair_generated_arcpy_code_fixes_legacy_text_element_signature() -> None:
+    repaired = _repair_generated_arcpy_code(
+        """
+import arcpy
+aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+layout = aprx.listLayouts()[0]
+map_title = CONTEXT.get("map_title")
+page_width = layout.pageWidth
+page_height = layout.pageHeight
+text_elem = aprx.createTextElement(
+    map_title,
+    "TEXT",
+    "Title",
+    (page_width / 2.0, page_height - 28.0)
+)
+"""
+    )
+
+    assert 'aprx.createTextElement(layout, arcpy.Point(page_width / 2.0, page_height - 0.35), \'POINT\', map_title' in repaired
+    assert "name='Title'" in repaired
+
+
+def test_ensure_prepared_dataset_loaded_injects_missing_raster_layer() -> None:
+    code = """
+import arcpy
+aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+layout = aprx.listLayouts()[0]
+title = aprx.createTextElement(layout, arcpy.Point(1, 1), "POINT", "waamj")
+aprx.save()
+layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)
+"""
+
+    repaired = _ensure_prepared_dataset_loaded(
+        code,
+        {"context": {"prepared_dataset_path": "C:\\data\\prepared.tif"}},
+    )
+
+    assert "map_obj = aprx.listMaps()[0]" in repaired
+    assert "added_layer = map_obj.addDataFromPath(prepared_dataset_path)" in repaired
+    assert repaired.index("addDataFromPath") < repaired.index("createTextElement")
 
 
 def test_render_payload_includes_layout_elements(monkeypatch) -> None:

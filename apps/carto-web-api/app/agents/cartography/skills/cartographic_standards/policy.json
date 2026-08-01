@@ -1,0 +1,23 @@
+{
+  "skill_id": "cartographic_standards",
+  "display_name": "Cartographic Standards Skill",
+  "title_element_name": "Title",
+  "font_family_aliases": {
+    "times new roman": "Times New Roman",
+    "微软雅黑": "Microsoft YaHei",
+    "microsoft yahei": "Microsoft YaHei",
+    "宋体": "SimSun",
+    "simsun": "SimSun",
+    "黑体": "SimHei",
+    "simhei": "SimHei"
+  },
+  "font_style_aliases": {
+    "bold": "Bold",
+    "加粗": "Bold",
+    "粗体": "Bold",
+    "regular": "Regular",
+    "常规": "Regular",
+    "italic": "Italic",
+    "斜体": "Italic"
+  }
+}

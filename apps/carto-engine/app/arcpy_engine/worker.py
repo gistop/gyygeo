@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from app.core.config import get_settings
+from app.arcpy_engine.typography import apply_text_typography_operations
 from app.schemas.project import LayoutElementPosition, LayoutPage, LayoutText, RenderPreviewRequest
 
 _LAYOUT_ELEMENT_TYPES = (
@@ -100,6 +101,7 @@ def render_with_arcpy(
         messages.extend(_apply_layout_page(layout, request.project.page))
         _apply_title(layout, request.project.title)
         _apply_layout_text(layout, request.project.layout_text)
+        messages.extend(apply_text_typography_operations(layout, request.project.text_styles))
         messages.extend(_apply_layout_element_positions(layout, request.project.layout_elements))
         _apply_extent(arcpy, layout, map_obj, request)
 

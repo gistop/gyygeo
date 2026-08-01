@@ -132,7 +132,64 @@ class ArcPyCodeRunner:
             )
         if not output_path.exists():
             raise RuntimeError(f"ArcPy code did not create output: {output_path}")
+
+        typography_files = {}
+        if request.text_styles:
+            typography_files = self._run_typography_postprocess(
+                request=request,
+                work_aprx=work_aprx,
+                output_path=output_path,
+                output_dir=output_dir,
+            )
+
+        if typography_files:
+            result["files"] = {**result["files"], **typography_files}
+            result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
+
+    def _run_typography_postprocess(
+        self,
+        *,
+        request: ArcPyCodeRequest,
+        work_aprx: Path,
+        output_path: Path,
+        output_dir: Path,
+    ) -> Dict[str, str]:
+        script_path = output_dir / "postprocess_typography.py"
+        stdout_path = output_dir / "postprocess_typography_stdout.txt"
+        stderr_path = output_dir / "postprocess_typography_stderr.txt"
+        script_path.write_text(
+            _typography_postprocess_source(
+                base_dir=self.settings.base_dir,
+                aprx_path=work_aprx,
+                output_path=output_path,
+                output_format=request.output_format,
+                dpi=request.dpi,
+                text_styles=[style.model_dump() for style in request.text_styles],
+            ),
+            encoding="utf-8",
+        )
+
+        completed = subprocess.run(
+            [str(self.settings.python_exe), str(script_path)],
+            cwd=str(self.settings.base_dir),
+            capture_output=True,
+            text=True,
+            timeout=self.settings.job_timeout_seconds or None,
+            check=False,
+        )
+        stdout_path.write_text(completed.stdout, encoding="utf-8")
+        stderr_path.write_text(completed.stderr, encoding="utf-8")
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "ArcPy typography postprocess failed with return code "
+                f"{completed.returncode}. See stderr: {stderr_path}"
+            )
+        return {
+            "typography_script": str(script_path),
+            "typography_stdout": str(stdout_path),
+            "typography_stderr": str(stderr_path),
+        }
 
     @staticmethod
     def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -161,6 +218,46 @@ def _script_source(
         "# LLM generated ArcPy code starts here.\n"
         f"{code.rstrip()}\n"
         "# LLM generated ArcPy code ends here.\n"
+    )
+
+
+def _typography_postprocess_source(
+    *,
+    base_dir: Path,
+    aprx_path: Path,
+    output_path: Path,
+    output_format: str,
+    dpi: int,
+    text_styles: list[Dict[str, Any]],
+) -> str:
+    styles_json = json.dumps(text_styles, ensure_ascii=False, indent=2)
+    return (
+        "from __future__ import annotations\n\n"
+        "import json\n"
+        "import sys\n"
+        f"sys.path.insert(0, r{str(base_dir)!r})\n\n"
+        "import arcpy\n"
+        "from app.arcpy_engine.typography import apply_text_typography_operations\n"
+        "from app.schemas.project import TextTypography\n\n"
+        f"APRX_PATH = r{str(aprx_path)!r}\n"
+        f"OUTPUT_PATH = r{str(output_path)!r}\n"
+        f"OUTPUT_FORMAT = {output_format!r}\n"
+        f"DPI = {int(dpi)}\n"
+        f"TEXT_STYLES = json.loads({styles_json!r})\n\n"
+        "aprx = arcpy.mp.ArcGISProject(APRX_PATH)\n"
+        "try:\n"
+        "    layout = aprx.listLayouts()[0]\n"
+        "    styles = [TextTypography(**item) for item in TEXT_STYLES]\n"
+        "    apply_text_typography_operations(layout, styles)\n"
+        "    aprx.save()\n"
+        "    if OUTPUT_FORMAT == 'png':\n"
+        "        layout.exportToPNG(OUTPUT_PATH, resolution=DPI)\n"
+        "    elif OUTPUT_FORMAT == 'pdf':\n"
+        "        layout.exportToPDF(OUTPUT_PATH, resolution=DPI)\n"
+        "    else:\n"
+        "        layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)\n"
+        "finally:\n"
+        "    del aprx\n"
     )
 
 

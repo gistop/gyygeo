@@ -14,6 +14,8 @@ Verified runtime:
 - When present, `CONTEXT["prepared_dataset_path"]` is the local GeoTIFF prepared from the left-side
   data panel. Add it to the first map with `map_obj.addDataFromPath(...)` before exporting unless
   the user explicitly asks for a layout-only change.
+- For requests to generate a remote-sensing/image map, loading `CONTEXT["prepared_dataset_path"]`
+  is mandatory. Do not create only layout elements such as title text and export an empty template.
 - After adding `CONTEXT["prepared_dataset_path"]`, zoom the layout map frame to that layer's extent
   with `map_frame.getLayerExtent(...)` and `map_frame.camera.setExtent(...)`. Add about `0.08`
   proportional padding around the extent, matching the standard render workflow's `fit_padding`.

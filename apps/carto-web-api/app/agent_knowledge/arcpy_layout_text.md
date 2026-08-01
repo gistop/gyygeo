@@ -21,6 +21,9 @@ title = aprx.createTextElement(
 )
 ```
 
+Important: the third positional argument is a geometry text type, not a semantic role. For map
+titles, still pass `"POINT"` as `text_type`; never pass `"TITLE"` or `"TEXT"` there.
+
 After creating point text, set a center anchor if the text should be centered:
 
 ```python
@@ -36,6 +39,9 @@ layout.createTextElement(...)
 layout.createMapTitle(...)
 map_frame.createMapTitle(...)
 createMapTitle(...)
+aprx.createTextElement(title_text, "TEXT", "Title", (x, y))
+aprx.createTextElement(layout, point, "TITLE", title_text)
+aprx.createTextElement(layout, point, "TEXT", title_text)
 ```
 
 To update an existing title only when it exists:

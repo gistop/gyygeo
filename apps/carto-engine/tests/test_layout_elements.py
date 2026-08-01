@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 import pytest
 
+from app.arcpy_engine.code_runner import _typography_postprocess_source
+from app.arcpy_engine.typography import apply_text_typography_operations
 from app.arcpy_engine.worker import _apply_layout_element_positions, _apply_layout_page
-from app.schemas.project import LayoutElementPosition, LayoutPage, RenderPreviewRequest
+from app.schemas.project import LayoutElementPosition, LayoutPage, RenderPreviewRequest, TextTypography
 
 
 class FakeElement:
@@ -25,6 +28,9 @@ class FakeElement:
         self.elementPositionY = 0.0
         self.anchor = None
         self.children = children or []
+        self.textSize = None
+        self.fontFamilyName = None
+        self.fontStyleName = None
 
     def setAnchor(self, anchor: str) -> None:
         self.anchor = anchor
@@ -249,3 +255,67 @@ def test_render_request_accepts_page_options() -> None:
     assert request.project.page is not None
     assert request.project.page.size == "a4"
     assert request.project.page.orientation == "landscape"
+
+
+def test_apply_text_typography_operations_updates_text_element() -> None:
+    title = FakeElement("Title", width=4.0, height=0.5, element_type="TEXT_ELEMENT")
+    layout = FakeLayout([title])
+
+    messages = apply_text_typography_operations(
+        layout,
+        [
+            TextTypography(
+                element_name="Title",
+                font_family="Times New Roman",
+                font_size=6,
+                font_style="Bold",
+            )
+        ],
+    )
+
+    assert title.textSize == 6.0
+    assert title.fontFamilyName == "Times New Roman"
+    assert title.fontStyleName == "Bold"
+    assert messages == [
+        "Applied typography to text element Title: font_family=Times New Roman, font_size=6, font_style=Bold"
+    ]
+
+
+def test_render_request_accepts_text_styles() -> None:
+    request = RenderPreviewRequest(
+        project={
+            "project_name": "demo-map",
+            "text_styles": [
+                {
+                    "element_name": "Title",
+                    "font_family": "Times New Roman",
+                    "font_size": 6,
+                    "font_style": "Bold",
+                }
+            ],
+        },
+        dry_run=True,
+    )
+
+    assert request.project.text_styles[0].element_name == "Title"
+    assert request.project.text_styles[0].font_size == 6
+
+
+def test_typography_postprocess_source_imports_engine_typography() -> None:
+    source = _typography_postprocess_source(
+        base_dir=Path("C:/app"),
+        aprx_path=Path("C:/tmp/work.aprx"),
+        output_path=Path("C:/tmp/output.jpg"),
+        output_format="jpg",
+        dpi=300,
+        text_styles=[
+            {
+                "element_name": "Title",
+                "font_family": "Times New Roman",
+                "font_size": 6,
+            }
+        ],
+    )
+
+    assert "from app.arcpy_engine.typography import apply_text_typography_operations" in source
+    assert "layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)" in source

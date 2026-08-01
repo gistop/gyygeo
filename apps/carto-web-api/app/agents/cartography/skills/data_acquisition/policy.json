@@ -1,0 +1,12 @@
+{
+  "skill_id": "data_acquisition",
+  "display_name": "Data Acquisition Skill",
+  "default_provider": "mpc",
+  "default_limit": 10,
+  "min_limit": 1,
+  "max_limit": 100,
+  "selection_strategy": "lowest_cloud_cover_then_earliest_datetime",
+  "pending_action_type": "select_image",
+  "candidate_message": "Select one candidate image to continue the expert map task."
+}
+

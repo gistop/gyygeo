@@ -197,3 +197,7 @@ export interface AgentChatResponse {
   task?: AgentTask | null;
   requires_confirmation: boolean;
 }
+
+export interface AgentImageSelectionPayload {
+  item_id: string;
+}

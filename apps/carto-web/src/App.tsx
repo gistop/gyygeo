@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import maplibregl, { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import {
@@ -33,6 +33,7 @@ import {
   renderPreview,
   sendAgentChat,
   sendExpertAgentChat,
+  selectAgentTaskImage,
   searchItems,
 } from "./api";
 import type {
@@ -88,6 +89,7 @@ export function App() {
   const [previewLayers, setPreviewLayers] = useState<PreviewRasterLayer[]>([]);
   const [prepareJobId, setPrepareJobId] = useState<string | null>(null);
   const [renderJobId, setRenderJobId] = useState<string | null>(null);
+  const [agentImageSelectionTaskId, setAgentImageSelectionTaskId] = useState<string | null>(null);
 
   const dataHealth = useQuery({
     queryKey: ["health", "data"],
@@ -253,11 +255,39 @@ export function App() {
       isTerminal(query.state.data?.status) ? false : 2000,
   });
 
+  const agentImageSelectionMutation = useMutation({
+    mutationFn: ({ taskId, itemId }: { taskId: string; itemId: string }) =>
+      selectAgentTaskImage(taskId, { item_id: itemId }),
+    onSuccess: () => {
+      setAgentImageSelectionTaskId(null);
+    },
+  });
+
   const items = searchResults;
   const canPrepare = Boolean(selectedItem) && !prepareMutation.isPending;
   const canRender =
     dryRun ||
     (prepareJob.data?.status === "done" && Boolean(preparedDatasetPath) && !renderMutation.isPending);
+  const handleSearchItemSelect = useCallback(
+    (item: SearchItem) => {
+      setSelectedItem(item);
+      if (!agentImageSelectionTaskId || agentImageSelectionMutation.isPending) {
+        return;
+      }
+      agentImageSelectionMutation.mutate({
+        taskId: agentImageSelectionTaskId,
+        itemId: item.item_id,
+      });
+    },
+    [agentImageSelectionMutation, agentImageSelectionTaskId],
+  );
+  const handleAgentTaskUpdate = useCallback((task: AgentTask) => {
+    if (isAgentWaitingForImageSelection(task)) {
+      setAgentImageSelectionTaskId(task.id);
+      return;
+    }
+    setAgentImageSelectionTaskId((current) => (current === task.id ? null : current));
+  }, []);
   const agentContext = useMemo<AgentPageContext>(() => {
     return {
       provider,
@@ -392,7 +422,7 @@ export function App() {
                   const isPreviewLoading = previewMutation.isPending && previewMutation.variables?.item_id === item.item_id;
                   return (
                     <div key={item.item_id} className={`item-card ${isSelected ? "selected" : ""}`}>
-                      <button className="item-card-main" type="button" onClick={() => setSelectedItem(item)}>
+                      <button className="item-card-main" type="button" onClick={() => handleSearchItemSelect(item)}>
                         <span>{item.item_id}</span>
                         <small>{formatItemMeta(item)}</small>
                       </button>
@@ -422,7 +452,13 @@ export function App() {
                 })
               )}
             </div>
+            {agentImageSelectionTaskId ? (
+              <div className="empty-state">请选择一景影像继续专家制图任务。</div>
+            ) : null}
             {searchMutation.error ? <ErrorText error={searchMutation.error} /> : null}
+            {agentImageSelectionMutation.error ? (
+              <ErrorText error={agentImageSelectionMutation.error} />
+            ) : null}
             {previewMutation.error ? <ErrorText error={previewMutation.error} /> : null}
           </div>
 
@@ -511,6 +547,7 @@ export function App() {
           setPrepareJobId(null);
           setRenderJobId(null);
         }}
+        onTaskUpdate={handleAgentTaskUpdate}
       />
       </section>
     </main>
@@ -959,9 +996,11 @@ function MapPanel({
 function ChatPanel({
   context,
   onSearchResults,
+  onTaskUpdate,
 }: {
   context: AgentPageContext;
   onSearchResults: (items: SearchItem[]) => void;
+  onTaskUpdate: (task: AgentTask) => void;
 }) {
   const [agentMode, setAgentMode] = useState<"workflow" | "expert">("workflow");
   const [draft, setDraft] = useState("");
@@ -1038,6 +1077,14 @@ function ChatPanel({
     reportedSearchResultsRef.current = signature;
     onSearchResults(searchItems);
   }, [activeTask.data, onSearchResults]);
+
+  useEffect(() => {
+    const task = activeTask.data;
+    if (!task) {
+      return;
+    }
+    onTaskUpdate(task);
+  }, [activeTask.data, onTaskUpdate]);
 
   const submitMessage = () => {
     const content = draft.trim();
@@ -1399,6 +1446,11 @@ function extractAgentSearchItems(task?: AgentTask): SearchItem[] {
     }
     return [item as unknown as SearchItem];
   });
+}
+
+function isAgentWaitingForImageSelection(task: AgentTask): boolean {
+  const pendingAction = isRecord(task.outputs.pending_action) ? task.outputs.pending_action : undefined;
+  return task.status === "waiting_for_user" && pendingAction?.type === "select_image";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

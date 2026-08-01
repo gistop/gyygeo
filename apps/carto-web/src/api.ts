@@ -1,6 +1,7 @@
 import type {
   AgentChatPayload,
   AgentChatResponse,
+  AgentImageSelectionPayload,
   AgentTask,
   AiChatPayload,
   AiChatResponse,
@@ -127,4 +128,14 @@ export function sendExpertAgentChat(payload: AgentChatPayload): Promise<AgentCha
 
 export function getAgentTask(taskId: string): Promise<AgentTask> {
   return requestJson<AgentTask>(`${config.cartoWebApiUrl}/api/v1/agent/tasks/${taskId}`);
+}
+
+export function selectAgentTaskImage(
+  taskId: string,
+  payload: AgentImageSelectionPayload,
+): Promise<AgentTask> {
+  return requestJson<AgentTask>(`${config.cartoWebApiUrl}/api/v1/agent/tasks/${taskId}/select-image`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

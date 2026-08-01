@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import threading
@@ -13,7 +14,26 @@ from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from langgraph.types import Command
 from pydantic import BaseModel, Field
+
+from app.agents.cartography.graph import (
+    ExpertImageSelectionCallbacks,
+    build_expert_image_selection_graph,
+)
+from app.agents.cartography.skills.data_acquisition import (
+    build_pending_image_selection,
+    build_search_payload,
+    select_recommended_item,
+    selected_item_from_search,
+)
+from app.agents.cartography.skills.cartographic_standards import (
+    apply_cartographic_standards_to_tool_calls,
+)
+from app.agents.cartography.skills.remote_sensing_basemap import (
+    build_prepare_payload,
+    prepared_dataset_path,
+)
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -37,6 +57,9 @@ PageOrientation = Literal["portrait", "landscape"]
 _tasks: dict[str, "AgentTask"] = {}
 _tasks_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="carto-agent")
+_expert_image_selection_graph: Any = None
+_expert_graph_settings: dict[str, Any] = {}
+_expert_graph_settings_lock = threading.Lock()
 
 _NORTH_ARROW_ELEMENT_NAME = "zbz"
 _DEFAULT_LAYOUT_ELEMENT_INSET = 0.3
@@ -137,6 +160,26 @@ _EXPERT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         "type": "string",
                         "default": "default",
                     },
+                    "text_styles": {
+                        "type": "array",
+                        "description": (
+                            "Optional structured text typography operations executed by "
+                            "carto-engine after the generated ArcPy code. Use for stable "
+                            "font family, font size, and font style changes."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "element_name": {"type": "string"},
+                                "font_family": {"type": "string"},
+                                "font_size": {"type": "number"},
+                                "font_style": {"type": "string"},
+                                "required": {"type": "boolean", "default": True},
+                            },
+                            "required": ["element_name"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["code"],
                 "additionalProperties": False,
@@ -176,6 +219,10 @@ class AgentPageContext(BaseModel):
 class AgentChatRequest(BaseModel):
     messages: List[AgentChatMessage] = Field(min_length=1, max_length=30)
     context: Optional[AgentPageContext] = None
+
+
+class AgentImageSelectionRequest(BaseModel):
+    item_id: str = Field(min_length=1, max_length=500)
 
 
 class AgentStep(BaseModel):
@@ -267,15 +314,23 @@ def expert_chat(request: Request, payload: AgentChatRequest) -> AgentChatRespons
     tool_calls = _expert_tool_calls_from_user_message(user_message, payload.context, settings)
 
     task = _create_expert_task(user_message, payload.context, tool_calls)
-    _executor.submit(_run_expert_tool_call_task, task.id, settings)
+    if _expert_tool_calls_need_image_selection(tool_calls):
+        _executor.submit(_run_expert_image_selection_task, task.id, settings)
+        content = (
+            f"Started expert image search task {task.id}. "
+            "I will pause after searching so you can select one candidate image on the left."
+        )
+    else:
+        _executor.submit(_run_expert_tool_call_task, task.id, settings)
+        content = (
+            f"Started expert tool task {task.id}. "
+            f"I am executing {len(tool_calls)} internal tool step(s)."
+        )
 
     return AgentChatResponse(
         message=AgentChatMessage(
             role="assistant",
-            content=(
-                f"Started expert tool task {task.id}. "
-                f"I am executing {len(tool_calls)} internal tool step(s)."
-            ),
+            content=content,
         ),
         model="gyygeo-expert-tools-0.1",
         task=task,
@@ -287,6 +342,23 @@ def get_task(task_id: str) -> AgentTask:
     task = _get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Agent task not found.")
+    return task
+
+
+@router.post("/tasks/{task_id}/select-image", response_model=AgentTask)
+def select_task_image(
+    request: Request,
+    task_id: str,
+    payload: AgentImageSelectionRequest,
+) -> AgentTask:
+    task = _get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Agent task not found.")
+    if task.status != "waiting_for_user" or not _task_waits_for_image_selection(task):
+        raise HTTPException(status_code=409, detail="Agent task is not waiting for image selection.")
+
+    settings = request.app.state.settings
+    _executor.submit(_resume_expert_image_selection_task, task.id, payload.item_id, settings)
     return task
 
 
@@ -416,6 +488,16 @@ def _create_expert_task(
         )
         for call in tool_calls
     ]
+    if _expert_tool_calls_need_image_selection(tool_calls):
+        search_index = next(
+            (
+                index
+                for index, call in enumerate(tool_calls)
+                if call["name"] == _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES
+            ),
+            -1,
+        )
+        steps.insert(search_index + 1, AgentStep(name="select_remote_sensing_image"))
     if run_tool_call:
         steps.append(AgentStep(name="check_expert_output"))
     task = AgentTask(
@@ -519,6 +601,99 @@ def _run_expert_tool_call_task(task_id: str, settings: Any) -> None:
         _set_task_status(task, "failed", f"Expert internal tool failed: {task.error}")
 
 
+def _run_expert_image_selection_task(task_id: str, settings: Any) -> None:
+    _remember_expert_graph_settings(task_id, settings)
+    try:
+        result = _expert_image_selection_graph_instance().invoke(
+            {"task_id": task_id},
+            config=_expert_graph_config(task_id),
+        )
+        if "__interrupt__" in result:
+            task = _require_task(task_id)
+            _mark_task_waiting_for_image_selection(task)
+    except Exception as exc:  # noqa: BLE001
+        task = _require_task(task_id)
+        task.error = str(exc)
+        _set_task_status(task, "failed", f"Expert image-selection workflow failed: {task.error}")
+
+
+def _resume_expert_image_selection_task(
+    task_id: str,
+    item_id: str,
+    settings: Any,
+) -> None:
+    _remember_expert_graph_settings(task_id, settings)
+    try:
+        _expert_image_selection_graph_instance().invoke(
+            Command(resume={"item_id": item_id}),
+            config=_expert_graph_config(task_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        task = _require_task(task_id)
+        task.error = str(exc)
+        _set_task_status(task, "failed", f"Expert image-selection workflow failed: {task.error}")
+
+
+def _expert_graph_search_images(task_id: str) -> None:
+    task = _require_task(task_id)
+    settings = _expert_graph_settings_for_task(task_id)
+    _set_task_status(task, "running", "Searching remote-sensing candidate images.")
+    tool_call = _require_expert_tool_call(task, _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES)
+    search_result = _run_step(
+        task,
+        _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+        lambda: _execute_expert_tool_call(task, tool_call, settings),
+    )
+    recommended_item = _tool_select_best_image(search_result)
+    _merge_task_outputs(
+        task,
+        {
+            "search": search_result,
+            "recommended_item": recommended_item,
+            "pending_action": build_pending_image_selection(recommended_item),
+        },
+    )
+
+
+def _expert_graph_continue_with_image(task_id: str, item_id: str) -> None:
+    task = _require_task(task_id)
+    settings = _expert_graph_settings_for_task(task_id)
+    selected_item = _selected_item_from_search(task, item_id)
+    _complete_image_selection_step(task, selected_item)
+    _merge_task_outputs(
+        task,
+        {
+            "selected_item": selected_item,
+            "pending_action": None,
+        },
+    )
+    _set_task_status(task, "running", f"Continuing expert map task with image {item_id}.")
+
+    run_result = None
+    for tool_call in task.outputs["tool_calls"]:
+        if tool_call["name"] == _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES:
+            continue
+        next_call = _tool_call_with_selected_item(tool_call, item_id)
+        result = _run_step(
+            task,
+            str(next_call["name"]),
+            lambda call=next_call: _execute_expert_tool_call(task, call, settings),
+        )
+        _merge_task_outputs(task, _expert_tool_output(next_call["name"], result))
+        if next_call["name"] == _EXPERT_TOOL_RUN_ARCPY_CODE:
+            run_result = result
+
+    if run_result is not None:
+        check_result = _run_step(
+            task,
+            "check_expert_output",
+            lambda: _tool_check_expert_output(run_result),
+        )
+        _merge_task_outputs(task, {"qa": check_result})
+    _set_task_status(task, "done", "Expert map task completed with the selected image.")
+    _forget_expert_graph_settings(task_id)
+
+
 def _run_step(task: AgentTask, name: str, fn: Any) -> Dict[str, Any]:
     step = _find_step(task, name)
     step.status = "running"
@@ -546,6 +721,71 @@ def _run_step(task: AgentTask, name: str, fn: Any) -> Dict[str, Any]:
 
 def _merge_task_outputs(task: AgentTask, outputs: Dict[str, Any]) -> None:
     task.outputs = {**task.outputs, **outputs}
+    task.updated_at = _now()
+    _save_task(task)
+
+
+def _expert_image_selection_graph_instance() -> Any:
+    global _expert_image_selection_graph
+    if _expert_image_selection_graph is None:
+        _expert_image_selection_graph = build_expert_image_selection_graph(
+            ExpertImageSelectionCallbacks(
+                search_images=_expert_graph_search_images,
+                continue_with_image=_expert_graph_continue_with_image,
+            )
+        )
+    return _expert_image_selection_graph
+
+
+def _expert_graph_config(task_id: str) -> Dict[str, Any]:
+    return {"configurable": {"thread_id": task_id}}
+
+
+def _remember_expert_graph_settings(task_id: str, settings: Any) -> None:
+    with _expert_graph_settings_lock:
+        _expert_graph_settings[task_id] = settings
+
+
+def _expert_graph_settings_for_task(task_id: str) -> Any:
+    with _expert_graph_settings_lock:
+        settings = _expert_graph_settings.get(task_id)
+    if settings is None:
+        raise RuntimeError(f"Expert graph settings were not registered for task {task_id}.")
+    return settings
+
+
+def _forget_expert_graph_settings(task_id: str) -> None:
+    with _expert_graph_settings_lock:
+        _expert_graph_settings.pop(task_id, None)
+
+
+def _mark_task_waiting_for_image_selection(task: AgentTask) -> None:
+    pending_action = task.outputs.get("pending_action")
+    if not isinstance(pending_action, dict):
+        pending_action = {"type": "select_image"}
+        task.outputs = {**task.outputs, "pending_action": pending_action}
+    step = _find_step(task, "select_remote_sensing_image")
+    step.status = "running"
+    step.started_at = step.started_at or _now()
+    step.summary = "Waiting for the user to select one candidate image."
+    task.status = "waiting_for_user"
+    task.message = (
+        "Found candidate remote-sensing images. Select one image from the left search "
+        "results to continue preparing the basemap."
+    )
+    task.updated_at = _now()
+    _save_task(task)
+
+
+def _complete_image_selection_step(
+    task: AgentTask,
+    selected_item: Dict[str, Any],
+) -> None:
+    step = _find_step(task, "select_remote_sensing_image")
+    step.status = "done"
+    step.finished_at = _now()
+    step.output = selected_item
+    step.summary = selected_item.get("summary", "")
     task.updated_at = _now()
     _save_task(task)
 
@@ -578,16 +818,7 @@ def _tool_search_remote_sensing_images(
     map_spec: Dict[str, Any],
     data_service_url: str,
 ) -> Dict[str, Any]:
-    payload = {
-        "provider": map_spec["basemap"]["provider"],
-        "collection": map_spec["basemap"]["collection"],
-        "bbox": map_spec["study_area"]["bbox"],
-        "geometry": map_spec["study_area"].get("geometry"),
-        "datetime": map_spec["basemap"].get("datetime"),
-        "limit": map_spec["basemap"].get("limit") or 10,
-        "cloud_cover_lte": map_spec["basemap"].get("cloud_cover_lte"),
-    }
-    payload = {key: value for key, value in payload.items() if value is not None}
+    payload = build_search_payload(map_spec)
     response = _post_json(f"{data_service_url}/api/v1/searches", payload)
     items = response.get("items") or []
     if not items:
@@ -601,20 +832,7 @@ def _tool_search_remote_sensing_images(
 
 def _tool_select_best_image(search_result: Dict[str, Any]) -> Dict[str, Any]:
     items = search_result["items"]
-
-    def sort_key(item: Dict[str, Any]) -> tuple[float, str]:
-        cloud = item.get("cloud_cover")
-        cloud_value = float(cloud) if isinstance(cloud, (int, float)) else 999.0
-        return cloud_value, str(item.get("datetime") or "")
-
-    selected = sorted(items, key=sort_key)[0]
-    return {
-        "summary": (
-            "Selected image "
-            f"{selected.get('item_id')} with cloud cover {selected.get('cloud_cover', 'unknown')}."
-        ),
-        "item": selected,
-    }
+    return select_recommended_item(items)
 
 
 def _tool_prepare_remote_sensing_basemap(
@@ -622,25 +840,7 @@ def _tool_prepare_remote_sensing_basemap(
     selected_item: Dict[str, Any],
     data_service_url: str,
 ) -> Dict[str, Any]:
-    item = selected_item["item"]
-    payload = {
-        "provider": map_spec["basemap"]["provider"],
-        "collection": map_spec["basemap"]["collection"],
-        "item_id": item["item_id"],
-        "bbox": map_spec["study_area"]["bbox"],
-        "geometry": map_spec["study_area"].get("geometry"),
-        "bbox_crs": "EPSG:4326",
-        "bands": map_spec["basemap"]["bands"],
-        "target_resolution": map_spec["basemap"].get("target_resolution"),
-        "target_crs": map_spec["basemap"].get("target_crs"),
-        "requested_by": "gyygeo-agent",
-        "output": {"format": "geotiff", "purpose": "carto-render"},
-        "metadata": {
-            "agent_task_kind": "research_area_overview",
-            "prepare_strategy": "mpc_dynamic_tiles",
-        },
-    }
-    payload = {key: value for key, value in payload.items() if value is not None}
+    payload = build_prepare_payload(map_spec, selected_item)
     response = _post_json(f"{data_service_url}/api/v1/prepare-jobs", payload)
     job = _poll_job(data_service_url, response["job"]["id"], timeout_seconds=240)
     dataset = (job.get("result") or {}).get("dataset") or {}
@@ -798,6 +998,7 @@ def _execute_expert_tool_call(
             normalized["arguments"]["code"],
             settings,
             task.id,
+            text_styles=normalized["arguments"].get("text_styles") or [],
         )
     raise ValueError(f"Unknown expert tool: {normalized['name']}")
 
@@ -838,9 +1039,8 @@ def _apply_prepared_dataset_to_expert_context(
     task: AgentTask,
     prepare_result: Dict[str, Any],
 ) -> None:
-    dataset = prepare_result.get("dataset") or {}
-    path = dataset.get("path")
-    if not isinstance(path, str) or not path:
+    path = prepared_dataset_path(prepare_result)
+    if path is None:
         return
 
     context = task.map_spec.get("context")
@@ -857,8 +1057,11 @@ def _tool_run_arcpy_code(
     code: str,
     settings: Any,
     task_id: str,
+    *,
+    text_styles: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     output = map_spec.get("output") or {}
+    code = _ensure_prepared_dataset_loaded(code, map_spec)
     payload = {
         "code": code,
         "requested_by": "gyygeo-expert-agent",
@@ -866,6 +1069,7 @@ def _tool_run_arcpy_code(
         "template_id": map_spec.get("template_id") or "default",
         "output_format": output.get("format") or "jpg",
         "dpi": output.get("dpi") or 300,
+        "text_styles": text_styles,
         "context": map_spec.get("context") or {},
         "metadata": {
             "agent_task_id": task_id,
@@ -929,12 +1133,15 @@ def _expert_tool_calls_from_user_message(
 ) -> List[Dict[str, Any]]:
     code = _extract_python_code(message)
     if code is not None:
-        return [
-            _create_run_arcpy_code_tool_call(
-                code,
-                output_format=_extract_expert_output_format(message),
-            )
-        ]
+        return _apply_cartographic_standards_to_expert_tool_calls(
+            message,
+            [
+                _create_run_arcpy_code_tool_call(
+                    code,
+                    output_format=_extract_expert_output_format(message),
+                )
+            ],
+        )
     return _generate_expert_tool_calls(message, context, settings)
 
 
@@ -944,16 +1151,20 @@ def _create_run_arcpy_code_tool_call(
     output_format: str = "jpg",
     dpi: int = 300,
     template_id: str = "default",
+    text_styles: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    arguments: Dict[str, Any] = {
+        "code": code,
+        "output_format": output_format,
+        "dpi": dpi,
+        "template_id": template_id,
+    }
+    if text_styles:
+        arguments["text_styles"] = text_styles
     return _normalize_expert_tool_call(
         {
             "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
-            "arguments": {
-                "code": code,
-                "output_format": output_format,
-                "dpi": dpi,
-                "template_id": template_id,
-            },
+            "arguments": arguments,
         }
     )
 
@@ -1108,15 +1319,175 @@ def _normalize_expert_run_arcpy_arguments(arguments: Dict[str, Any]) -> Dict[str
     if not template_id:
         raise ValueError("Expert tool template_id cannot be empty.")
 
+    normalized_arguments: Dict[str, Any] = {
+        "code": _repair_generated_arcpy_code(code.strip()),
+        "output_format": output_format,
+        "dpi": dpi,
+        "template_id": template_id,
+    }
+    text_styles = _normalize_text_styles(arguments.get("text_styles"))
+    if text_styles:
+        normalized_arguments["text_styles"] = text_styles
+
     return {
         "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
-        "arguments": {
-            "code": code.strip(),
-            "output_format": output_format,
-            "dpi": dpi,
-            "template_id": template_id,
-        },
+        "arguments": normalized_arguments,
     }
+
+
+def _normalize_text_styles(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("run_arcpy_code text_styles must be a list.")
+
+    styles = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Each run_arcpy_code text style must be an object.")
+        element_name = item.get("element_name")
+        if not isinstance(element_name, str) or not element_name.strip():
+            raise ValueError("Each run_arcpy_code text style requires element_name.")
+        style: Dict[str, Any] = {"element_name": element_name.strip()}
+
+        font_family = item.get("font_family")
+        if isinstance(font_family, str) and font_family.strip():
+            style["font_family"] = font_family.strip()
+
+        font_style = item.get("font_style")
+        if isinstance(font_style, str) and font_style.strip():
+            style["font_style"] = font_style.strip()
+
+        font_size = item.get("font_size")
+        if font_size is not None:
+            try:
+                font_size_value = float(font_size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("run_arcpy_code text style font_size must be numeric.") from exc
+            if font_size_value <= 0:
+                raise ValueError("run_arcpy_code text style font_size must be positive.")
+            style["font_size"] = font_size_value
+
+        required = item.get("required")
+        if required is not None:
+            style["required"] = bool(required)
+
+        if not any(key in style for key in ("font_family", "font_size", "font_style")):
+            raise ValueError(
+                "Each run_arcpy_code text style requires font_family, font_size, or font_style."
+            )
+        styles.append(style)
+    return styles
+
+
+class _CreateTextElementRepairer(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "createTextElement":
+            return node
+
+        if len(node.args) >= 4 and _string_constant(node.args[1]) == "TEXT":
+            point_arg = node.args[3]
+            if isinstance(point_arg, ast.Tuple) and len(point_arg.elts) == 2:
+                point_arg = ast.Call(
+                    func=ast.Attribute(value=ast.Name(id="arcpy", ctx=ast.Load()), attr="Point", ctx=ast.Load()),
+                    args=list(point_arg.elts),
+                    keywords=[],
+                )
+            keywords = list(node.keywords)
+            if not _has_keyword(keywords, "name"):
+                keywords.append(ast.keyword(arg="name", value=node.args[2]))
+            if not _has_keyword(keywords, "text_size"):
+                keywords.append(ast.keyword(arg="text_size", value=ast.Constant(value=24)))
+            node.args = [
+                ast.Name(id="layout", ctx=ast.Load()),
+                point_arg,
+                ast.Constant(value="POINT"),
+                node.args[0],
+            ]
+            node.keywords = keywords
+            return node
+
+        if len(node.args) >= 3 and (_string_constant(node.args[2]) or "").upper() in {
+            "TEXT",
+            "TITLE",
+        }:
+            node.args[2] = ast.Constant(value="POINT")
+        return node
+
+
+def _repair_generated_arcpy_code(code: str) -> str:
+    repaired = _repair_title_layout_units(code)
+    try:
+        tree = ast.parse(repaired)
+    except SyntaxError:
+        return repaired
+    tree = _CreateTextElementRepairer().visit(tree)
+    ast.fix_missing_locations(tree)
+    try:
+        return ast.unparse(tree)
+    except Exception:  # noqa: BLE001
+        return repaired
+
+
+def _repair_title_layout_units(code: str) -> str:
+    return re.sub(r"(page_height\s*-\s*)28(?:\.0)?\b", r"\g<1>0.35", code)
+
+
+def _string_constant(node: ast.AST) -> Optional[str]:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _has_keyword(keywords: List[ast.keyword], name: str) -> bool:
+    return any(keyword.arg == name for keyword in keywords)
+
+
+def _ensure_prepared_dataset_loaded(code: str, map_spec: Dict[str, Any]) -> str:
+    context = map_spec.get("context")
+    if not isinstance(context, dict) or not context.get("prepared_dataset_path"):
+        return code
+    if "addDataFromPath" in code:
+        return code
+
+    block = """
+map_obj = aprx.listMaps()[0]
+prepared_dataset_path = CONTEXT.get("prepared_dataset_path")
+if prepared_dataset_path:
+    added_layer = map_obj.addDataFromPath(prepared_dataset_path)
+    if hasattr(added_layer, "name"):
+        added_layer.name = "Prepared Remote Sensing Basemap"
+
+    map_frames = layout.listElements("MAPFRAME_ELEMENT")
+    if map_frames:
+        map_frame = map_frames[0]
+        try:
+            layer_extent = map_frame.getLayerExtent(added_layer, False, True)
+            padding = 0.08
+            x_padding = (float(layer_extent.XMax) - float(layer_extent.XMin)) * padding
+            y_padding = (float(layer_extent.YMax) - float(layer_extent.YMin)) * padding
+            padded_extent = arcpy.Extent(
+                float(layer_extent.XMin) - x_padding,
+                float(layer_extent.YMin) - y_padding,
+                float(layer_extent.XMax) + x_padding,
+                float(layer_extent.YMax) + y_padding,
+            )
+            if getattr(layer_extent, "spatialReference", None):
+                try:
+                    padded_extent.spatialReference = layer_extent.spatialReference
+                except Exception:
+                    pass
+            map_frame.camera.setExtent(padded_extent)
+        except Exception:
+            pass
+""".strip()
+    layout_match = re.search(
+        r"(?m)^(?P<indent>\s*)layout\s*=\s*aprx\.listLayouts\(\)\[0\]\s*$",
+        code,
+    )
+    if not layout_match:
+        return code
+    insert_at = layout_match.end()
+    return f"{code[:insert_at]}\n\n{block}\n{code[insert_at:]}"
 
 
 def _create_expert_map_spec(
@@ -1202,6 +1573,51 @@ def _find_expert_tool_call(
     return None
 
 
+def _expert_tool_calls_need_image_selection(tool_calls: List[Dict[str, Any]]) -> bool:
+    names = _expert_tool_names(tool_calls)
+    return (
+        _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES in names
+        and _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP in names
+    )
+
+
+def _task_waits_for_image_selection(task: AgentTask) -> bool:
+    pending_action = task.outputs.get("pending_action")
+    return isinstance(pending_action, dict) and pending_action.get("type") == "select_image"
+
+
+def _require_expert_tool_call(task: AgentTask, name: str) -> Dict[str, Any]:
+    tool_calls = task.outputs.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        raise RuntimeError("Expert task does not include tool calls.")
+    call = _find_expert_tool_call(tool_calls, name)
+    if call is None:
+        raise RuntimeError(f"Expert task does not include {name}.")
+    return call
+
+
+def _selected_item_from_search(task: AgentTask, item_id: str) -> Dict[str, Any]:
+    search_result = task.outputs.get("search")
+    if not isinstance(search_result, dict):
+        raise RuntimeError("Expert task has no search result to select from.")
+    return selected_item_from_search(search_result, item_id)
+
+
+def _tool_call_with_selected_item(
+    tool_call: Dict[str, Any],
+    item_id: str,
+) -> Dict[str, Any]:
+    if tool_call["name"] != _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP:
+        return tool_call
+    return {
+        **tool_call,
+        "arguments": {
+            **tool_call["arguments"],
+            "item_id": item_id,
+        },
+    }
+
+
 def _redact_expert_tool_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
     redacted = dict(arguments)
     code = redacted.pop("code", None)
@@ -1249,6 +1665,9 @@ def _generate_expert_tool_calls(
         "add it to the map with map_obj.addDataFromPath unless the user explicitly asks otherwise. "
         "After adding that raster, set the layout map frame extent to the added layer extent with "
         "approximately 8 percent padding. The script must create OUTPUT_PATH.\n\n"
+        "For text typography such as title font family, font size, or font style, prefer the "
+        "run_arcpy_code text_styles argument instead of hand-writing ArcPy typography code. "
+        "Use element_name such as Title when the target layout text element is known.\n\n"
         "Use the following project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -1377,7 +1796,16 @@ def _complete_expert_tool_calls(
     if needs_run and _EXPERT_TOOL_RUN_ARCPY_CODE not in names:
         completed.append(_generate_expert_run_arcpy_tool_call(message, context, settings))
 
-    return _normalize_expert_tool_calls(completed)
+    return _normalize_expert_tool_calls(
+        _apply_cartographic_standards_to_expert_tool_calls(message, completed)
+    )
+
+
+def _apply_cartographic_standards_to_expert_tool_calls(
+    message: str,
+    tool_calls: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    return apply_cartographic_standards_to_tool_calls(message, tool_calls)
 
 
 def _generate_expert_run_arcpy_tool_call(
@@ -1395,7 +1823,8 @@ def _generate_expert_run_arcpy_tool_call(
         "present, add that raster to the first map, set the first layout map frame extent to the "
         "added layer extent with about 8 percent padding, apply requested title/layout changes, "
         "save the APRX, and export the first layout to OUTPUT_PATH. The script must create "
-        "OUTPUT_PATH.\n\n"
+        "OUTPUT_PATH. For text typography such as title font family, font size, or font style, "
+        "prefer the run_arcpy_code text_styles argument when returning tool calls.\n\n"
         "Use this project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -1415,6 +1844,7 @@ def _generate_expert_run_arcpy_tool_call(
     code = _extract_python_code(response) or response.strip()
     if not code:
         raise HTTPException(status_code=502, detail="DeepSeek returned empty ArcPy code.")
+    code = _repair_generated_arcpy_code(code)
     return _create_run_arcpy_code_tool_call(
         code,
         output_format=_extract_expert_output_format(message),
