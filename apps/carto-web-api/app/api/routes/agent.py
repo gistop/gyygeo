@@ -252,6 +252,7 @@ class AgentPageContext(BaseModel):
     map_title: Optional[str] = None
     layout_name: Optional[str] = None
     prepared_dataset_path: Optional[str] = None
+    layout_elements: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AgentChatRequest(BaseModel):
@@ -1174,14 +1175,16 @@ def _expert_tool_calls_from_user_message(
 ) -> List[Dict[str, Any]]:
     code = _extract_python_code(message)
     if code is not None:
+        tool_calls = [
+            _create_run_arcpy_code_tool_call(
+                code,
+                output_format=_extract_expert_output_format(message),
+            )
+        ]
+        tool_calls = _apply_context_layout_elements_to_expert_tool_calls(context, tool_calls)
         return _apply_cartographic_standards_to_expert_tool_calls(
             message,
-            [
-                _create_run_arcpy_code_tool_call(
-                    code,
-                    output_format=_extract_expert_output_format(message),
-                )
-            ],
+            tool_calls,
         )
     return _generate_expert_tool_calls(message, context, settings)
 
@@ -1917,9 +1920,56 @@ def _complete_expert_tool_calls(
     if needs_run and _EXPERT_TOOL_RUN_ARCPY_CODE not in names:
         completed.append(_generate_expert_run_arcpy_tool_call(message, context, settings))
 
+    completed = _apply_context_layout_elements_to_expert_tool_calls(context, completed)
     return _normalize_expert_tool_calls(
         _apply_cartographic_standards_to_expert_tool_calls(message, completed)
     )
+
+
+def _apply_context_layout_elements_to_expert_tool_calls(
+    context: Optional[AgentPageContext],
+    tool_calls: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    context_layout_elements = _context_layout_elements(context)
+    if not context_layout_elements:
+        return tool_calls
+
+    updated_calls = []
+    for tool_call in tool_calls:
+        if tool_call.get("name") != _EXPERT_TOOL_RUN_ARCPY_CODE:
+            updated_calls.append(tool_call)
+            continue
+        arguments = dict(tool_call.get("arguments") or {})
+        arguments["layout_elements"] = _merge_layout_elements_by_name(
+            context_layout_elements,
+            arguments.get("layout_elements") or [],
+        )
+        updated_calls.append({**tool_call, "arguments": arguments})
+    return updated_calls
+
+
+def _context_layout_elements(context: Optional[AgentPageContext]) -> List[Dict[str, Any]]:
+    if context is None or not context.layout_elements:
+        return []
+    return _normalize_layout_elements(context.layout_elements)
+
+
+def _merge_layout_elements_by_name(
+    base_elements: List[Dict[str, Any]],
+    override_elements: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for item in [*base_elements, *_normalize_layout_elements(override_elements)]:
+        name = _normalized_layout_element_name(item["element_name"])
+        if name not in merged:
+            order.append(name)
+        merged[name] = item
+    return [merged[name] for name in order]
+
+
+def _normalized_layout_element_name(value: str) -> str:
+    return "".join(value.split()).casefold()
 
 
 def _apply_cartographic_standards_to_expert_tool_calls(

@@ -119,6 +119,7 @@ export interface RenderPayload {
     fit_to_layers: boolean;
     fit_layer_names: string[];
     fit_padding: number;
+    layout_elements?: LayoutElementPosition[];
     export: {
       format: "png" | "jpg" | "pdf";
       dpi: number;
@@ -142,6 +143,13 @@ export interface AiChatResponse {
   model: string;
 }
 
+export interface LayoutElementPosition {
+  element_name: string;
+  x: number;
+  y: number;
+  units: "millimeter" | "centimeter" | "inch";
+}
+
 export interface AgentPageContext {
   provider: string;
   collection: string;
@@ -157,6 +165,7 @@ export interface AgentPageContext {
   map_title?: string;
   layout_name?: string;
   prepared_dataset_path?: string;
+  layout_elements?: LayoutElementPosition[];
 }
 
 export type AgentTaskStatus = "queued" | "running" | "waiting_for_user" | "done" | "failed";

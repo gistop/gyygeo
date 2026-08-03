@@ -65,6 +65,7 @@ import type {
   Bbox,
   JobRecord,
   JobStatus,
+  LayoutElementPosition,
   LngLatPair,
   PolygonGeometry,
   PreparePayload,
@@ -129,6 +130,10 @@ const layoutPaperPresets: Array<{
 
 const cssPixelPerMm = 4.8;
 const mapResizeHandles: ResizeHandle[] = ["n", "e", "s", "w", "ne", "nw", "se", "sw"];
+const layoutAdornmentElementNames: Record<LayoutAdornmentId, string> = {
+  "north-arrow": "zbz",
+  "scale-bar": "比例尺",
+};
 
 const initialBbox: Bbox = [111.60403861995178, 26.215688129123563, 111.61948814387728, 26.226467899170814];
 const initialPolygon: LngLatPair[] = [
@@ -167,6 +172,9 @@ export function App() {
   const [layoutTileZoom, setLayoutTileZoom] = useState(0);
   const [paperSize, setPaperSize] = useState<LayoutPaperId>("custom-145x100");
   const [layoutAdornmentIds, setLayoutAdornmentIds] = useState<LayoutAdornmentId[]>([]);
+  const [layoutElementRects, setLayoutElementRects] = useState(() =>
+    createInitialElementRects(getLayoutPaperPreset("custom-145x100")),
+  );
 
   const dataHealth = useQuery({
     queryKey: ["health", "data"],
@@ -283,6 +291,10 @@ export function App() {
   const preparedDatasetPath = useMemo(() => {
     return extractPreparedPath(prepareJob.data);
   }, [prepareJob.data]);
+  const activeLayoutElements = useMemo(
+    () => layoutElementsForAgent(layoutAdornmentIds, layoutElementRects, getLayoutPaperPreset(paperSize)),
+    [layoutAdornmentIds, layoutElementRects, paperSize],
+  );
 
   const renderMutation = useMutation({
     mutationFn: () => {
@@ -311,6 +323,7 @@ export function App() {
           fit_to_layers: Boolean(layerPath),
           fit_layer_names: layerPath ? ["Prepared Raster"] : [],
           fit_padding: 0.08,
+          layout_elements: activeLayoutElements,
           export: {
             format: "png",
             dpi: 150,
@@ -370,6 +383,10 @@ export function App() {
       current.includes(adornmentId) ? current.filter((id) => id !== adornmentId) : [...current, adornmentId],
     );
   }, []);
+  const handlePaperSizeChange = useCallback((paperId: LayoutPaperId) => {
+    setPaperSize(paperId);
+    setLayoutElementRects(createInitialElementRects(getLayoutPaperPreset(paperId)));
+  }, []);
   const agentContext = useMemo<AgentPageContext>(() => {
     return {
       provider,
@@ -386,10 +403,12 @@ export function App() {
       map_title: mapTitle.trim() || undefined,
       layout_name: layoutName.trim() || undefined,
       prepared_dataset_path: preparedDatasetPath,
+      layout_elements: activeLayoutElements,
     };
   }, [
     activeBbox,
     activeGeometry,
+    activeLayoutElements,
     aoiMode,
     bands,
     cloudCover,
@@ -651,7 +670,7 @@ export function App() {
               onLayoutTileZoomChange={setLayoutTileZoom}
               onLayoutToolChange={setLayoutTool}
               onLayoutZoomChange={setLayoutZoom}
-              onPaperSizeChange={setPaperSize}
+              onPaperSizeChange={handlePaperSizeChange}
               onToggleLayoutAdornment={toggleLayoutAdornment}
               paperSize={paperSize}
             />
@@ -662,6 +681,7 @@ export function App() {
           {activeWorkflowTab === "cartography" ? (
             <LayoutMapPanel
               baseLayer={baseLayer}
+              elementRects={layoutElementRects}
               layoutAdornmentIds={layoutAdornmentIds}
               layoutMapZoom={layoutMapZoom}
               layoutTileZoom={layoutTileZoom}
@@ -669,6 +689,7 @@ export function App() {
               layoutZoom={layoutZoom}
               paperSize={paperSize}
               previewLayers={previewLayers}
+              onElementRectsChange={setLayoutElementRects}
               onLayoutMapZoomChange={setLayoutMapZoom}
             />
           ) : (
@@ -1309,6 +1330,7 @@ function MapPanel({
 
 function LayoutMapPanel({
   baseLayer,
+  elementRects,
   layoutAdornmentIds,
   layoutMapZoom,
   layoutTileZoom,
@@ -1316,9 +1338,11 @@ function LayoutMapPanel({
   layoutZoom,
   paperSize,
   previewLayers,
+  onElementRectsChange,
   onLayoutMapZoomChange,
 }: {
   baseLayer: BaseLayer;
+  elementRects: Record<LayoutElementId, LayoutElementRect>;
   layoutAdornmentIds: LayoutAdornmentId[];
   layoutMapZoom: number;
   layoutTileZoom: number;
@@ -1326,6 +1350,9 @@ function LayoutMapPanel({
   layoutZoom: number;
   paperSize: LayoutPaperId;
   previewLayers: PreviewRasterLayer[];
+  onElementRectsChange: (
+    updater: (current: Record<LayoutElementId, LayoutElementRect>) => Record<LayoutElementId, LayoutElementRect>,
+  ) => void;
   onLayoutMapZoomChange: (zoom: number) => void;
 }) {
   const boardRef = useRef<HTMLDivElement | null>(null);
@@ -1338,7 +1365,6 @@ function LayoutMapPanel({
     offsetY: number;
   } | null>(null);
   const paper = getLayoutPaperPreset(paperSize);
-  const [elementRects, setElementRects] = useState(() => createInitialElementRects(paper));
   const [paperOffset, setPaperOffset] = useState({ x: 0, y: 0 });
   const [boardScroll, setBoardScroll] = useState({ left: 0, top: 0 });
   const [selectedElementId, setSelectedElementId] = useState<LayoutElementId | null>(null);
@@ -1354,7 +1380,6 @@ function LayoutMapPanel({
   useEffect(() => {
     setPaperOffset({ x: 0, y: 0 });
     setSelectedElementId(null);
-    setElementRects(createInitialElementRects(paper));
   }, [paperSize]);
 
   useEffect(() => {
@@ -1506,7 +1531,7 @@ function LayoutMapPanel({
       const deltaX = (moveEvent.clientX - startClientX) / (cssPixelPerMm * zoomScale);
       const deltaY = (moveEvent.clientY - startClientY) / (cssPixelPerMm * zoomScale);
 
-      setElementRects((current) => ({
+      onElementRectsChange((current) => ({
         ...current,
         [elementId]: {
           ...current[elementId],
@@ -1566,7 +1591,7 @@ function LayoutMapPanel({
         nextHeight = clampNumber(startRect.height + deltaY, minMapFrameSizeMm, paper.heightMm - startRect.y);
       }
 
-      setElementRects((current) => ({
+      onElementRectsChange((current) => ({
         ...current,
         "map-frame": {
           height: nextHeight,
@@ -2377,6 +2402,26 @@ function createInitialElementRects(paper: { heightMm: number; widthMm: number })
 
 function getLayoutPaperPreset(paperSize: LayoutPaperId) {
   return layoutPaperPresets.find((paper) => paper.id === paperSize) ?? layoutPaperPresets[0];
+}
+
+function layoutElementsForAgent(
+  activeAdornmentIds: LayoutAdornmentId[],
+  rects: Record<LayoutElementId, LayoutElementRect>,
+  paper: { heightMm: number },
+): LayoutElementPosition[] {
+  return activeAdornmentIds.map((id) => {
+    const rect = rects[id];
+    return {
+      element_name: layoutAdornmentElementNames[id],
+      x: roundLayoutMm(rect.x),
+      y: roundLayoutMm(paper.heightMm - rect.y - rect.height),
+      units: "millimeter",
+    };
+  });
+}
+
+function roundLayoutMm(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 function mmToCssPx(valueMm: number, zoomScale: number) {

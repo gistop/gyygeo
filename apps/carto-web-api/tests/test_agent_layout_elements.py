@@ -113,6 +113,52 @@ def test_create_expert_task_carries_prepared_dataset_path_into_context() -> None
     )
 
 
+def test_complete_expert_tool_calls_uses_context_layout_elements() -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        layout_elements=[
+            {"element_name": "zbz", "x": 120.0, "y": 73.0, "units": "millimeter"},
+            {"element_name": "比例尺", "x": 16.0, "y": 8.0, "units": "millimeter"},
+        ],
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "按当前版面生成地图",
+        context,
+        [_create_run_arcpy_code_tool_call("print('ok')")],
+        None,
+    )
+    run_call = tool_calls[0]
+
+    assert run_call["arguments"]["layout_elements"] == [
+        {"element_name": "zbz", "x": 120.0, "y": 73.0, "units": "millimeter"},
+        {"element_name": "比例尺", "x": 16.0, "y": 8.0, "units": "millimeter"},
+    ]
+
+
+def test_explicit_expert_layout_request_overrides_context_layout_element() -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        layout_elements=[
+            {"element_name": "zbz", "x": 120.0, "y": 73.0, "units": "millimeter"},
+        ],
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "生成地图，指北针位置 x=2 y=2",
+        context,
+        [_create_run_arcpy_code_tool_call("print('ok')")],
+        None,
+    )
+    run_call = tool_calls[0]
+
+    assert run_call["arguments"]["layout_elements"] == [
+        {"element_name": "zbz", "x": 2.0, "y": 2.0, "units": "inch"},
+    ]
+
+
 def test_create_expert_task_uses_tool_call_output_options() -> None:
     task = _create_expert_task(
         "专家制图",
