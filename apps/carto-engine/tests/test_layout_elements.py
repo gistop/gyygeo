@@ -7,9 +7,19 @@ import pytest
 
 from app.arcpy_engine.code_runner import _typography_postprocess_source
 from app.arcpy_engine.typography import apply_text_typography_operations
-from app.arcpy_engine.worker import _apply_layout_element_positions, _apply_layout_page
+from app.arcpy_engine.worker import (
+    _apply_layout_element_positions,
+    _apply_layout_operations,
+    _apply_layout_page,
+)
 from app.schemas.arcpy_code import ArcPyCodeRequest
-from app.schemas.project import LayoutElementPosition, LayoutPage, RenderPreviewRequest, TextTypography
+from app.schemas.project import (
+    LayoutElementPosition,
+    LayoutOperation,
+    LayoutPage,
+    RenderPreviewRequest,
+    TextTypography,
+)
 
 
 class FakeElement:
@@ -42,6 +52,70 @@ class FakeElement:
         wildcard: Optional[str] = None,
     ) -> List["FakeElement"]:
         return _filter_fake_elements(self.children, element_type, wildcard)
+
+
+class FakeGrid:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class FakeCamera:
+    def __init__(self) -> None:
+        self.extent = "extent"
+
+    def getExtent(self) -> str:
+        return self.extent
+
+    def setExtent(self, extent: str) -> None:
+        self.extent = extent
+
+
+class FakeMapFrame(FakeElement):
+    def __init__(self, name: str, width: float = 8.0, height: float = 6.0) -> None:
+        super().__init__(name, width=width, height=height, element_type="MAPFRAME_ELEMENT")
+        self.grids: List[FakeGrid] = []
+        self.camera = FakeCamera()
+
+    def addGrid(self, style: "FakeStyle") -> FakeGrid:
+        grid = FakeGrid(style.name)
+        self.grids.append(grid)
+        return grid
+
+
+class FakeStyle:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class FakeMap:
+    name = "Map"
+
+
+class FakeAprx:
+    def __init__(self) -> None:
+        self.map = FakeMap()
+
+    def listStyleItems(self, gallery: str, style_class: str, style_name: str) -> List[FakeStyle]:
+        return [FakeStyle(style_name)]
+
+    def listMaps(self, name: Optional[str] = None) -> List[FakeMap]:
+        if name and name != self.map.name:
+            return []
+        return [self.map]
+
+
+class FakeArcpy:
+    @staticmethod
+    def Point(x: float, y: float) -> tuple[str, float, float]:
+        return ("point", x, y)
+
+    @staticmethod
+    def Array(points: List[tuple[str, float, float]]) -> List[tuple[str, float, float]]:
+        return points
+
+    @staticmethod
+    def Polygon(points: List[tuple[str, float, float]]) -> tuple[str, List[tuple[str, float, float]]]:
+        return ("polygon", points)
 
 
 class FakeLayout:
@@ -79,22 +153,47 @@ class FakeLayout:
         self.pageHeight = page_height
         self.resize_elements = resize_elements
 
+    def createMapSurroundElement(
+        self,
+        geometry: object,
+        surround_type: str,
+        map_frame: FakeMapFrame,
+        style: Optional[FakeStyle],
+        name: str,
+    ) -> FakeElement:
+        element = FakeElement(name, width=0.0, height=0.0, element_type="MAPSURROUND_ELEMENT")
+        element.geometry = geometry
+        element.surround_type = surround_type
+        element.map_frame = map_frame
+        element.style = style
+        self.elements.append(element)
+        return element
+
+    def createMapFrame(self, geometry: object, map_obj: FakeMap, name: str) -> FakeMapFrame:
+        frame = FakeMapFrame(name)
+        frame.geometry = geometry
+        frame.map = map_obj
+        self.elements.append(frame)
+        return frame
+
 
 def _filter_fake_elements(
     elements: List[FakeElement],
     element_type: Optional[str],
     wildcard: Optional[str],
 ) -> List[FakeElement]:
-        if element_type == "*":
-            raise ValueError("Invalid value for element_type: '*'")
-        filtered = elements
-        if element_type is not None:
-            if element_type not in FakeLayout.valid_element_types:
-                raise ValueError(f"Invalid value for element_type: {element_type}")
-            filtered = [element for element in filtered if element.element_type == element_type]
-        if wildcard is None:
-            return filtered
-        return [element for element in filtered if element.name == wildcard]
+    if element_type == "*":
+        raise ValueError("Invalid value for element_type: '*'")
+    filtered = elements
+    if element_type is not None:
+        if element_type not in FakeLayout.valid_element_types:
+            raise ValueError(f"Invalid value for element_type: {element_type}")
+        filtered = [element for element in filtered if element.element_type == element_type]
+    if wildcard is None:
+        return filtered
+    if wildcard == "*":
+        return filtered
+    return [element for element in filtered if element.name == wildcard]
 
 
 def test_layout_element_anchor_position_uses_page_bounds() -> None:
@@ -230,6 +329,55 @@ def test_layout_element_position_rejects_mixed_anchor_and_xy() -> None:
         LayoutElementPosition(element_name="North Arrow", anchor="bottom_left", x=1.0, y=1.0)
 
 
+def test_layout_operations_create_scale_bar_grid_and_inset_map() -> None:
+    map_frame = FakeMapFrame("Main Map Frame", width=9.0, height=7.0)
+    layout = FakeLayout([map_frame])
+    aprx = FakeAprx()
+
+    messages = _apply_layout_operations(
+        FakeArcpy,
+        aprx,
+        layout,
+        aprx.map,
+        [
+            LayoutOperation(type="ensure_scale_bar", anchor="bottom_left", width=4.0, height=0.5),
+            LayoutOperation(type="ensure_grid"),
+            LayoutOperation(type="ensure_inset_map", anchor="bottom_right", width=3.0, height=2.0),
+        ],
+    )
+
+    scale_bar = layout.listElements("MAPSURROUND_ELEMENT", "比例尺")[0]
+    inset_frame = layout.listElements("MAPFRAME_ELEMENT", "Inset Map Frame")[0]
+    assert scale_bar.elementWidth == 4.0
+    assert scale_bar.elementHeight == 0.5
+    assert map_frame.grids[0].name == "黑色垂直标注格网"
+    assert inset_frame.elementPositionX == 7.0
+    assert inset_frame.elementPositionY == 0.0
+    assert messages == [
+        "Ensured SCALE_BAR 比例尺 at 0.000, 0.000",
+        "Ensured grid 黑色垂直标注格网",
+        "Ensured inset map frame Inset Map Frame at 7.000, 0.000",
+    ]
+
+
+def test_layout_operations_reuse_existing_north_arrow() -> None:
+    map_frame = FakeMapFrame("Main Map Frame")
+    north_arrow = FakeElement("zbz", width=1.0, height=1.0, element_type="MAPSURROUND_ELEMENT")
+    layout = FakeLayout([map_frame, north_arrow])
+
+    _apply_layout_operations(
+        FakeArcpy,
+        FakeAprx(),
+        layout,
+        FakeMap(),
+        [LayoutOperation(type="ensure_north_arrow", anchor="top_right", offset_x=-0.5, offset_y=-0.25)],
+    )
+
+    assert len(layout.listElements("MAPSURROUND_ELEMENT", "zbz")) == 1
+    assert north_arrow.elementPositionX == 8.5
+    assert north_arrow.elementPositionY == 6.75
+
+
 def test_layout_page_rejects_mixed_named_and_custom_size() -> None:
     with pytest.raises(ValueError, match="Use either page size"):
         LayoutPage(size="a4", width=10.0, height=8.0)
@@ -252,6 +400,28 @@ def test_render_request_accepts_layout_elements() -> None:
     )
 
     assert request.project.layout_elements[0].anchor == "bottom_left"
+
+
+def test_render_request_accepts_layout_operations() -> None:
+    request = RenderPreviewRequest(
+        project={
+            "project_name": "demo-map",
+            "layout_operations": [
+                {
+                    "type": "ensure_scale_bar",
+                    "anchor": "bottom_left",
+                    "width": 4.0,
+                    "height": 0.5,
+                    "units": "centimeter",
+                },
+                {"type": "ensure_grid"},
+            ],
+        },
+        dry_run=True,
+    )
+
+    assert request.project.layout_operations[0].type == "ensure_scale_bar"
+    assert request.project.layout_operations[1].type == "ensure_grid"
 
 
 def test_render_request_accepts_page_options() -> None:
@@ -333,6 +503,24 @@ def test_arcpy_code_request_accepts_layout_elements() -> None:
     assert request.layout_elements[0].units == "inch"
 
 
+def test_arcpy_code_request_accepts_layout_operations() -> None:
+    request = ArcPyCodeRequest(
+        code="print('ok')",
+        layout_operations=[
+            {
+                "type": "ensure_inset_map",
+                "anchor": "bottom_right",
+                "width": 3.0,
+                "height": 2.0,
+                "units": "centimeter",
+            }
+        ],
+    )
+
+    assert request.layout_operations[0].type == "ensure_inset_map"
+    assert request.layout_operations[0].anchor == "bottom_right"
+
+
 def test_typography_postprocess_source_imports_engine_typography() -> None:
     source = _typography_postprocess_source(
         base_dir=Path("C:/app"),
@@ -355,9 +543,15 @@ def test_typography_postprocess_source_imports_engine_typography() -> None:
                 "units": "inch",
             }
         ],
+        layout_operations=[
+            {
+                "type": "ensure_grid",
+            }
+        ],
     )
 
     assert "from app.arcpy_engine.typography import apply_text_typography_operations" in source
-    assert "from app.arcpy_engine.worker import _apply_layout_element_positions" in source
+    assert "from app.arcpy_engine.worker import _apply_layout_element_positions, _apply_layout_operations" in source
     assert "layout_elements = [LayoutElementPosition(**item) for item in LAYOUT_ELEMENTS]" in source
+    assert "layout_operations = [LayoutOperation(**item) for item in LAYOUT_OPERATIONS]" in source
     assert "layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)" in source

@@ -76,6 +76,46 @@ class LayoutElementPosition(BaseModel):
         return self
 
 
+LayoutOperationType = Literal[
+    "ensure_scale_bar",
+    "ensure_north_arrow",
+    "ensure_grid",
+    "ensure_inset_map",
+]
+
+
+class LayoutOperation(BaseModel):
+    type: LayoutOperationType
+    name: Optional[str] = Field(default=None, min_length=1)
+    map_frame_name: Optional[str] = Field(default=None, min_length=1)
+    map_name: Optional[str] = Field(default=None, min_length=1)
+    style_gallery: str = Field(default="ArcGIS 2D", min_length=1)
+    style_name: Optional[str] = Field(default=None, min_length=1)
+    anchor: Optional[LayoutAnchor] = None
+    x: Optional[float] = None
+    y: Optional[float] = None
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    width: Optional[float] = Field(default=None, gt=0.0)
+    height: Optional[float] = Field(default=None, gt=0.0)
+    units: Optional[LayoutUnits] = None
+
+    @model_validator(mode="after")
+    def validate_operation(self) -> "LayoutOperation":
+        has_anchor = self.anchor is not None
+        has_x = self.x is not None
+        has_y = self.y is not None
+        if has_x != has_y:
+            raise ValueError("Layout operation x/y position requires both x and y.")
+        if has_anchor and (has_x or has_y):
+            raise ValueError("Use either anchor or x/y for a layout operation.")
+        if self.width is not None and self.height is None:
+            raise ValueError("Layout operation width/height requires both width and height.")
+        if self.height is not None and self.width is None:
+            raise ValueError("Layout operation width/height requires both width and height.")
+        return self
+
+
 PageSizeName = Literal["a0", "a1", "a2", "a3", "a4", "letter", "legal"]
 PageOrientation = Literal["portrait", "landscape"]
 PageUnits = LayoutUnits
@@ -137,6 +177,7 @@ class MapProjectConfig(BaseModel):
     layout_text: List[LayoutText] = Field(default_factory=list)
     text_styles: List[TextTypography] = Field(default_factory=list)
     layout_elements: List[LayoutElementPosition] = Field(default_factory=list)
+    layout_operations: List[LayoutOperation] = Field(default_factory=list)
     page: Optional[LayoutPage] = None
     export: ExportOptions = Field(default_factory=ExportOptions)
     metadata: Dict[str, Any] = Field(default_factory=dict)

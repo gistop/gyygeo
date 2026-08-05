@@ -7,6 +7,7 @@ from app.agents.cartography.skills.data_acquisition import (
 from app.agents.cartography.skills.cartographic_standards import build_text_styles_from_request
 from app.agents.cartography.skills.cartographic_standards import (
     build_layout_element_positions_from_request,
+    build_layout_operations_from_request,
 )
 from app.agents.cartography.skills.remote_sensing_basemap import build_prepare_payload
 from app.api.routes.agent import (
@@ -23,6 +24,7 @@ from app.api.routes.agent import (
     _normalize_expert_tool_call,
     _parse_expert_tool_call_content,
     _repair_generated_arcpy_code,
+    _strip_generated_layout_operation_blocks,
     _tool_render_research_area_overview_map,
     _tool_call_with_selected_item,
 )
@@ -256,6 +258,38 @@ def test_normalize_expert_run_arcpy_accepts_text_styles() -> None:
     ]
 
 
+def test_normalize_expert_run_arcpy_accepts_layout_operations() -> None:
+    tool_call = _normalize_expert_tool_call(
+        {
+            "name": "run_arcpy_code",
+            "arguments": {
+                "code": "print('ok')",
+                "layout_operations": [
+                    {
+                        "type": "ensure_scale_bar",
+                        "anchor": "bottom_left",
+                        "width": "4",
+                        "height": "0.5",
+                        "units": "centimeter",
+                    },
+                    {"type": "ensure_grid"},
+                ],
+            },
+        }
+    )
+
+    assert tool_call["arguments"]["layout_operations"] == [
+        {
+            "type": "ensure_scale_bar",
+            "anchor": "bottom_left",
+            "width": 4.0,
+            "height": 0.5,
+            "units": "centimeter",
+        },
+        {"type": "ensure_grid"},
+    ]
+
+
 def test_cartographic_standards_skill_builds_title_text_style() -> None:
     text_styles = build_text_styles_from_request("生成地图，标题字体 Times New Roman，字号 6，加粗")
 
@@ -299,6 +333,24 @@ def test_cartographic_standards_skill_builds_anchor_positions_with_offsets() -> 
             "anchor": "top_right",
             "offset_x": -0.5,
             "units": "centimeter",
+        },
+    ]
+
+
+def test_cartographic_standards_skill_builds_layout_operations() -> None:
+    operations = build_layout_operations_from_request(
+        "生成地图，添加比例尺放到左下角，添加指北针放到右上角，加格网，小图放到右下角"
+    )
+
+    assert operations == [
+        {"type": "ensure_scale_bar", "name": "比例尺", "anchor": "bottom_left", "units": "inch"},
+        {"type": "ensure_north_arrow", "name": "zbz", "anchor": "top_right", "units": "inch"},
+        {"type": "ensure_grid"},
+        {
+            "type": "ensure_inset_map",
+            "name": "Inset Map Frame",
+            "anchor": "bottom_right",
+            "units": "inch",
         },
     ]
 
@@ -391,6 +443,39 @@ def test_complete_expert_tool_calls_applies_anchor_positions(monkeypatch) -> Non
             "units": "centimeter",
         },
         {"element_name": "zbz", "anchor": "top_right", "units": "inch"},
+    ]
+
+
+def test_complete_expert_tool_calls_applies_layout_operations(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="landsat-c2-l2",
+        bbox=[100.0, 20.0, 101.0, 21.0],
+        prepared_dataset_path="C:\\data-service\\cache\\prepared\\demo.tif",
+    )
+
+    monkeypatch.setattr(
+        "app.api.routes.agent._generate_expert_run_arcpy_tool_call",
+        lambda message, context, settings: _create_run_arcpy_code_tool_call("print('ok')"),
+    )
+
+    tool_calls = _complete_expert_tool_calls(
+        "生成地图，添加比例尺放到左下角，添加指北针放到右上角，加格网，小图放到右下角",
+        context,
+        [],
+        object(),
+    )
+
+    run_call = tool_calls[-1]
+    assert run_call["arguments"]["layout_operations"] == [
+        {"type": "ensure_scale_bar", "name": "比例尺", "anchor": "bottom_left", "units": "inch"},
+        {"type": "ensure_north_arrow", "name": "zbz", "anchor": "top_right", "units": "inch"},
+        {"type": "ensure_grid"},
+        {
+            "type": "ensure_inset_map",
+            "name": "Inset Map Frame",
+            "anchor": "bottom_right",
+            "units": "inch",
+        },
     ]
 
 
@@ -595,6 +680,83 @@ text_elem = aprx.createTextElement(
     assert "name='Title'" in repaired
 
 
+def test_repair_generated_arcpy_code_fixes_layout_text_element_signature() -> None:
+    repaired = _repair_generated_arcpy_code(
+        """
+import arcpy
+aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+layout = aprx.listLayouts()[0]
+page_width = layout.pageWidth
+page_height = layout.pageHeight
+title_text = CONTEXT.get('map_title', 'Landsat Map')
+title = layout.createTextElement(title_text, 'Title')
+"""
+    )
+
+    assert "aprx.createTextElement(layout, arcpy.Point(page_width / 2.0, page_height - 0.35), 'POINT', title_text" in repaired
+    assert "name='Title'" in repaired
+
+
+def test_repair_generated_arcpy_code_fixes_aprx_text_element_position_dict() -> None:
+    repaired = _repair_generated_arcpy_code(
+        """
+import arcpy
+aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+layout = aprx.listLayouts()[0]
+map_title = CONTEXT.get('map_title', 'Landsat Map')
+page_width = layout.pageWidth
+page_height = layout.pageHeight
+title_elem = aprx.createTextElement(map_title, {'x': page_width / 2, 'y': page_height - 0.8, 'anchor': 'TOP_CENTER'})
+"""
+    )
+
+    assert "aprx.createTextElement(layout, arcpy.Point(page_width / 2, page_height - 0.8), 'POINT', map_title" in repaired
+    assert "name='Title'" in repaired
+
+
+def test_strip_generated_layout_operation_blocks_removes_unstable_surround_code() -> None:
+    stripped = _strip_generated_layout_operation_blocks(
+        """
+if main_extent:
+    map_frame.camera.setExtent(main_extent)
+scale_bar_matches = layout.listElements('MAPSURROUND_ELEMENT', 'Scale Bar')
+if scale_bar_matches:
+    scale_bar = scale_bar_matches[0]
+else:
+    scale_bar = layout.createMapSurround(map_frame, 'SCALE_BAR', 'Scale Bar')
+scale_bar.setAnchor('BOTTOM_LEFT_CORNER')
+na_matches = layout.listElements('MAPSURROUND_ELEMENT', 'zbz')
+if na_matches:
+    north_arrow = na_matches[0]
+else:
+    north_arrow = layout.createMapSurround(map_frame, 'NORTH_ARROW', 'North Arrow')
+inset_matches = layout.listElements('MAPFRAME_ELEMENT', 'Inset Map')
+if inset_matches:
+    inset_mf = inset_matches[0]
+else:
+    inset_mf = layout.cloneElement(map_frame)
+grids = map_frame.mapGrids
+if not grids:
+    map_frame.createMapGrid('GRATICULE', 'Graticule')
+title_text = CONTEXT.get('map_title', 'Landsat Map')
+title = layout.createTextElement(title_text, 'Title')
+aprx.save()
+""",
+        [
+            {"type": "ensure_scale_bar"},
+            {"type": "ensure_north_arrow"},
+            {"type": "ensure_grid"},
+            {"type": "ensure_inset_map"},
+        ],
+    )
+
+    assert "createMapSurround" not in stripped
+    assert "cloneElement" not in stripped
+    assert "createMapGrid" not in stripped
+    assert "title_text = CONTEXT.get" in stripped
+    assert "aprx.save()" in stripped
+
+
 def test_ensure_prepared_dataset_loaded_injects_missing_raster_layer() -> None:
     code = """
 import arcpy
@@ -649,6 +811,12 @@ def test_render_payload_includes_layout_elements(monkeypatch) -> None:
                         "offset_y": 0.3,
                     }
                 ],
+                "layout_operations": [
+                    {
+                        "type": "ensure_scale_bar",
+                        "anchor": "bottom_left",
+                    }
+                ],
             },
             "output": {"format": "png", "dpi": 150},
         },
@@ -664,6 +832,12 @@ def test_render_payload_includes_layout_elements(monkeypatch) -> None:
             "anchor": "bottom_left",
             "offset_x": 0.3,
             "offset_y": 0.3,
+        }
+    ]
+    assert captured["payload"]["project"]["layout_operations"] == [
+        {
+            "type": "ensure_scale_bar",
+            "anchor": "bottom_left",
         }
     ]
     assert captured["payload"]["project"]["page"] == {

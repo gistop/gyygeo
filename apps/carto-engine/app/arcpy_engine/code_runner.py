@@ -134,7 +134,7 @@ class ArcPyCodeRunner:
             raise RuntimeError(f"ArcPy code did not create output: {output_path}")
 
         typography_files = {}
-        if request.text_styles or request.layout_elements:
+        if request.text_styles or request.layout_elements or request.layout_operations:
             typography_files = self._run_typography_postprocess(
                 request=request,
                 work_aprx=work_aprx,
@@ -167,6 +167,7 @@ class ArcPyCodeRunner:
                 dpi=request.dpi,
                 text_styles=[style.model_dump() for style in request.text_styles],
                 layout_elements=[element.model_dump() for element in request.layout_elements],
+                layout_operations=[operation.model_dump() for operation in request.layout_operations],
             ),
             encoding="utf-8",
         )
@@ -231,9 +232,11 @@ def _typography_postprocess_source(
     dpi: int,
     text_styles: list[Dict[str, Any]],
     layout_elements: list[Dict[str, Any]] | None = None,
+    layout_operations: list[Dict[str, Any]] | None = None,
 ) -> str:
     styles_json = json.dumps(text_styles, ensure_ascii=False, indent=2)
     elements_json = json.dumps(layout_elements or [], ensure_ascii=False, indent=2)
+    operations_json = json.dumps(layout_operations or [], ensure_ascii=False, indent=2)
     return (
         "from __future__ import annotations\n\n"
         "import json\n"
@@ -241,21 +244,25 @@ def _typography_postprocess_source(
         f"sys.path.insert(0, r{str(base_dir)!r})\n\n"
         "import arcpy\n"
         "from app.arcpy_engine.typography import apply_text_typography_operations\n"
-        "from app.arcpy_engine.worker import _apply_layout_element_positions\n"
-        "from app.schemas.project import LayoutElementPosition, TextTypography\n\n"
+        "from app.arcpy_engine.worker import _apply_layout_element_positions, _apply_layout_operations\n"
+        "from app.schemas.project import LayoutElementPosition, LayoutOperation, TextTypography\n\n"
         f"APRX_PATH = r{str(aprx_path)!r}\n"
         f"OUTPUT_PATH = r{str(output_path)!r}\n"
         f"OUTPUT_FORMAT = {output_format!r}\n"
         f"DPI = {int(dpi)}\n"
         f"TEXT_STYLES = json.loads({styles_json!r})\n\n"
         f"LAYOUT_ELEMENTS = json.loads({elements_json!r})\n\n"
+        f"LAYOUT_OPERATIONS = json.loads({operations_json!r})\n\n"
         "aprx = arcpy.mp.ArcGISProject(APRX_PATH)\n"
         "try:\n"
         "    layout = aprx.listLayouts()[0]\n"
+        "    map_obj = aprx.listMaps()[0]\n"
         "    styles = [TextTypography(**item) for item in TEXT_STYLES]\n"
         "    layout_elements = [LayoutElementPosition(**item) for item in LAYOUT_ELEMENTS]\n"
+        "    layout_operations = [LayoutOperation(**item) for item in LAYOUT_OPERATIONS]\n"
         "    messages = []\n"
         "    messages.extend(apply_text_typography_operations(layout, styles))\n"
+        "    messages.extend(_apply_layout_operations(arcpy, aprx, layout, map_obj, layout_operations))\n"
         "    messages.extend(_apply_layout_element_positions(layout, layout_elements))\n"
         "    for message in messages:\n"
         "        print(message)\n"

@@ -67,7 +67,8 @@ def apply_cartographic_standards_to_tool_calls(
     policy = policy or load_cartographic_standards_policy()
     text_styles = build_text_styles_from_request(message, policy)
     layout_elements = build_layout_element_positions_from_request(message, policy)
-    if not text_styles and not layout_elements:
+    layout_operations = build_layout_operations_from_request(message, policy)
+    if not text_styles and not layout_elements and not layout_operations:
         return tool_calls
 
     updated_calls = []
@@ -86,8 +87,53 @@ def apply_cartographic_standards_to_tool_calls(
                 arguments.get("layout_elements"),
                 layout_elements,
             )
+        if layout_operations:
+            arguments["layout_operations"] = _merge_layout_operations(
+                arguments.get("layout_operations"),
+                layout_operations,
+            )
         updated_calls.append({**tool_call, "arguments": arguments})
     return updated_calls
+
+
+def build_layout_operations_from_request(
+    message: str,
+    policy: CartographicStandardsPolicy | None = None,
+) -> list[dict[str, Any]]:
+    policy = policy or load_cartographic_standards_policy()
+    operations: list[dict[str, Any]] = []
+
+    if _requests_layout_creation(message):
+        for alias, _element_name, operation_type, default_name in _SURROUND_OPERATION_ALIASES:
+            if alias.lower() not in message.lower():
+                continue
+            position = _extract_position_for_alias(
+                message,
+                alias,
+                _ALL_OPERATION_ALIASES,
+                policy,
+            )
+            operation: dict[str, Any] = {"type": operation_type, "name": default_name}
+            if position is not None:
+                operation.update(position)
+            operations.append(operation)
+
+    for alias in _GRID_ALIASES:
+        if alias.lower() in message.lower():
+            operations.append({"type": "ensure_grid"})
+            break
+
+    for alias in _INSET_ALIASES:
+        if alias.lower() not in message.lower():
+            continue
+        position = _extract_position_for_alias(message, alias, _ALL_OPERATION_ALIASES, policy)
+        operation = {"type": "ensure_inset_map", "name": "Inset Map Frame"}
+        if position is not None:
+            operation.update(position)
+        operations.append(operation)
+        break
+
+    return _dedupe_layout_operations(operations)
 
 
 def _layout_position_dump(operation: LayoutElementPositionOperation) -> dict[str, Any]:
@@ -114,6 +160,88 @@ def _merge_by_element_name(
         merged[key] = {**merged.get(key, {}), **item}
     return list(merged.values())
 
+
+def _merge_layout_operations(
+    existing: Any,
+    additions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, dict) and isinstance(item.get("type"), str):
+                key = _layout_operation_key(item)
+                merged[key] = dict(item)
+
+    for item in additions:
+        key = _layout_operation_key(item)
+        merged[key] = {**merged.get(key, {}), **item}
+    return list(merged.values())
+
+
+def _dedupe_layout_operations(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for operation in operations:
+        key = _layout_operation_key(operation)
+        merged[key] = {**merged.get(key, {}), **operation}
+    return list(merged.values())
+
+
+def _layout_operation_key(operation: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(operation.get("type") or "").strip().lower(),
+        str(operation.get("name") or "").strip().casefold(),
+    )
+
+
+def _requests_layout_creation(message: str) -> bool:
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in _LAYOUT_CREATION_KEYWORDS)
+
+
+_LAYOUT_CREATION_KEYWORDS = (
+    "\u6dfb\u52a0",
+    "\u52a0\u4e0a",
+    "\u52a0\u4e00\u4e2a",
+    "\u63d2\u5165",
+    "\u521b\u5efa",
+    "\u751f\u6210",
+    "\u5e26\u6709",
+    "\u5305\u542b",
+    "\u9700\u8981",
+    "add",
+    "insert",
+    "create",
+    "ensure",
+    "include",
+    "with",
+)
+_SURROUND_OPERATION_ALIASES: tuple[tuple[str, str, str, str], ...] = (
+    ("\u6bd4\u4f8b\u5c3a", "\u6bd4\u4f8b\u5c3a", "ensure_scale_bar", "\u6bd4\u4f8b\u5c3a"),
+    ("scale bar", "\u6bd4\u4f8b\u5c3a", "ensure_scale_bar", "\u6bd4\u4f8b\u5c3a"),
+    ("scalebar", "\u6bd4\u4f8b\u5c3a", "ensure_scale_bar", "\u6bd4\u4f8b\u5c3a"),
+    ("\u6307\u5317\u9488", "zbz", "ensure_north_arrow", "zbz"),
+    ("\u5317\u7bad\u5934", "zbz", "ensure_north_arrow", "zbz"),
+    ("north arrow", "zbz", "ensure_north_arrow", "zbz"),
+)
+_GRID_ALIASES = (
+    "\u683c\u7f51",
+    "\u7ecf\u7eac\u7f51",
+    "grid",
+    "graticule",
+)
+_INSET_ALIASES = (
+    "\u5c0f\u56fe",
+    "\u63d2\u56fe",
+    "\u9e70\u773c\u56fe",
+    "inset map",
+    "inset",
+    "overview map",
+)
+_ALL_OPERATION_ALIASES = tuple(
+    [alias for alias, _, _, _ in _SURROUND_OPERATION_ALIASES]
+    + list(_GRID_ALIASES)
+    + list(_INSET_ALIASES)
+)
 
 _ANCHOR_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("bottom_left", ("左下角", "左下", "lower left", "bottom left")),

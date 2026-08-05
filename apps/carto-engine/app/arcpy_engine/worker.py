@@ -9,7 +9,13 @@ from typing import Any, Dict, Iterable, Optional
 
 from app.core.config import get_settings
 from app.arcpy_engine.typography import apply_text_typography_operations
-from app.schemas.project import LayoutElementPosition, LayoutPage, LayoutText, RenderPreviewRequest
+from app.schemas.project import (
+    LayoutElementPosition,
+    LayoutOperation,
+    LayoutPage,
+    LayoutText,
+    RenderPreviewRequest,
+)
 
 _LAYOUT_ELEMENT_TYPES = (
     "GRAPHIC_ELEMENT",
@@ -30,6 +36,21 @@ _STANDARD_PAGE_SIZES_MM = {
     "a4": (210.0, 297.0),
     "letter": (215.9, 279.4),
     "legal": (215.9, 355.6),
+}
+_DEFAULT_SCALE_BAR_NAME = "\u6bd4\u4f8b\u5c3a"
+_DEFAULT_NORTH_ARROW_NAME = "zbz"
+_DEFAULT_INSET_MAP_FRAME_NAME = "Inset Map Frame"
+_DEFAULT_GRID_STYLE_NAME = "\u9ed1\u8272\u5782\u76f4\u6807\u6ce8\u683c\u7f51"
+_DEFAULT_SCALE_BAR_STYLE_NAME = "\u516c\u5236\u6bd4\u4f8b\u7ebf 1"
+_DEFAULT_OPERATION_SIZE_CM = {
+    "ensure_scale_bar": (3.75, 0.5),
+    "ensure_north_arrow": (1.0, 1.0),
+    "ensure_inset_map": (3.2, 2.25),
+}
+_DEFAULT_OPERATION_ANCHOR = {
+    "ensure_scale_bar": "bottom_left",
+    "ensure_north_arrow": "top_right",
+    "ensure_inset_map": "bottom_right",
 }
 
 _PAGE_UNIT_TO_MM = {
@@ -101,9 +122,10 @@ def render_with_arcpy(
         messages.extend(_apply_layout_page(layout, request.project.page))
         _apply_title(layout, request.project.title)
         _apply_layout_text(layout, request.project.layout_text)
-        messages.extend(apply_text_typography_operations(layout, request.project.text_styles))
-        messages.extend(_apply_layout_element_positions(layout, request.project.layout_elements))
         _apply_extent(arcpy, layout, map_obj, request)
+        messages.extend(apply_text_typography_operations(layout, request.project.text_styles))
+        messages.extend(_apply_layout_operations(arcpy, aprx, layout, map_obj, request.project.layout_operations))
+        messages.extend(_apply_layout_element_positions(layout, request.project.layout_elements))
 
         aprx.save()
         export_path = _export_layout(layout, request, output_dir)
@@ -254,6 +276,269 @@ def _set_layout_page_size(layout: Any, width: float, height: float) -> None:
         raise RuntimeError("Layout page size cannot be changed with this ArcPy runtime.") from exc
 
 
+def _apply_layout_operations(
+    arcpy: Any,
+    aprx: Any,
+    layout: Any,
+    map_obj: Any,
+    operations: list[LayoutOperation],
+) -> list[str]:
+    messages = []
+    for operation in operations:
+        if operation.type == "ensure_scale_bar":
+            messages.append(_ensure_map_surround(arcpy, aprx, layout, operation, "SCALE_BAR"))
+        elif operation.type == "ensure_north_arrow":
+            messages.append(_ensure_map_surround(arcpy, aprx, layout, operation, "NORTH_ARROW"))
+        elif operation.type == "ensure_grid":
+            messages.append(_ensure_grid(aprx, layout, operation))
+        elif operation.type == "ensure_inset_map":
+            messages.append(_ensure_inset_map_frame(arcpy, aprx, layout, map_obj, operation))
+        else:
+            raise ValueError(f"Unsupported layout operation: {operation.type}")
+    return messages
+
+
+def _ensure_map_surround(
+    arcpy: Any,
+    aprx: Any,
+    layout: Any,
+    operation: LayoutOperation,
+    surround_type: str,
+) -> str:
+    name = operation.name or (
+        _DEFAULT_SCALE_BAR_NAME if surround_type == "SCALE_BAR" else _DEFAULT_NORTH_ARROW_NAME
+    )
+    element = _find_layout_element_optional(layout, name)
+    width, height = _layout_operation_size(layout, operation)
+    x, y = _layout_operation_xy(layout, operation, width, height)
+
+    if element is None:
+        map_frame = _first_or_named_map_frame(layout, operation.map_frame_name)
+        style = None
+        if surround_type == "SCALE_BAR":
+            style = _style_item(
+                aprx,
+                operation.style_gallery,
+                "SCALE_BAR",
+                operation.style_name or _DEFAULT_SCALE_BAR_STYLE_NAME,
+            )
+        elif operation.style_name:
+            style = _style_item(aprx, operation.style_gallery, "NORTH_ARROW", operation.style_name)
+        element = layout.createMapSurroundElement(
+            _make_box(arcpy, x, y, x + width, y + height),
+            surround_type,
+            map_frame,
+            style,
+            name,
+        )
+    else:
+        _set_layout_element_bottom_left_anchor(element)
+
+    _set_element_size(element, width, height)
+    element.elementPositionX = x
+    element.elementPositionY = y
+    return f"Ensured {surround_type} {name} at {x:.3f}, {y:.3f}"
+
+
+def _ensure_grid(aprx: Any, layout: Any, operation: LayoutOperation) -> str:
+    map_frame = _first_or_named_map_frame(layout, operation.map_frame_name)
+    name = operation.name or operation.style_name or _DEFAULT_GRID_STYLE_NAME
+    if _map_frame_has_grid(map_frame, name):
+        return f"Reused grid {name}"
+
+    style = _style_item(
+        aprx,
+        operation.style_gallery,
+        "GRID",
+        operation.style_name or _DEFAULT_GRID_STYLE_NAME,
+    )
+    grid = map_frame.addGrid(style)
+    if operation.name and grid is not None and hasattr(grid, "name"):
+        try:
+            grid.name = operation.name
+        except Exception:
+            pass
+    return f"Ensured grid {name}"
+
+
+def _ensure_inset_map_frame(
+    arcpy: Any,
+    aprx: Any,
+    layout: Any,
+    map_obj: Any,
+    operation: LayoutOperation,
+) -> str:
+    name = operation.name or _DEFAULT_INSET_MAP_FRAME_NAME
+    element = _find_layout_element_optional(layout, name)
+    width, height = _layout_operation_size(layout, operation)
+    x, y = _layout_operation_xy(layout, operation, width, height)
+
+    if element is None:
+        inset_map = _operation_map(aprx, map_obj, operation.map_name)
+        source_frame = _first_or_named_map_frame(layout, operation.map_frame_name)
+        element = layout.createMapFrame(_make_box(arcpy, x, y, x + width, y + height), inset_map, name)
+        _copy_camera_extent(source_frame, element)
+    else:
+        _set_layout_element_bottom_left_anchor(element)
+
+    _set_element_size(element, width, height)
+    element.elementPositionX = x
+    element.elementPositionY = y
+    return f"Ensured inset map frame {name} at {x:.3f}, {y:.3f}"
+
+
+def _layout_operation_size(layout: Any, operation: LayoutOperation) -> tuple[float, float]:
+    layout_units = _layout_page_units(layout)
+    if operation.width is not None and operation.height is not None:
+        value_units = operation.units or layout_units
+        return _convert_page_size(
+            (operation.width, operation.height),
+            from_units=value_units,
+            to_units=layout_units,
+        )
+
+    size_cm = _DEFAULT_OPERATION_SIZE_CM.get(operation.type)
+    if size_cm is None:
+        raise ValueError(f"Layout operation {operation.type} does not use width and height.")
+    return _convert_page_size(size_cm, from_units="centimeter", to_units=layout_units)
+
+
+def _layout_operation_xy(
+    layout: Any,
+    operation: LayoutOperation,
+    width: float,
+    height: float,
+) -> tuple[float, float]:
+    layout_units = _layout_page_units(layout)
+    value_units = operation.units or layout_units
+    offset_x, offset_y = _convert_page_size(
+        (operation.offset_x, operation.offset_y),
+        from_units=value_units,
+        to_units=layout_units,
+    )
+    if operation.x is not None and operation.y is not None:
+        x, y = _convert_page_size(
+            (operation.x, operation.y),
+            from_units=value_units,
+            to_units=layout_units,
+        )
+        return x + offset_x, y + offset_y
+
+    anchor = operation.anchor or _DEFAULT_OPERATION_ANCHOR.get(operation.type)
+    if anchor is None:
+        raise ValueError(f"Layout operation {operation.type} requires a position.")
+
+    page_width = _layout_number(layout, "pageWidth")
+    page_height = _layout_number(layout, "pageHeight")
+    return _anchored_xy(anchor, page_width, page_height, width, height, offset_x, offset_y)
+
+
+def _anchored_xy(
+    anchor: str,
+    page_width: float,
+    page_height: float,
+    element_width: float,
+    element_height: float,
+    offset_x: float,
+    offset_y: float,
+) -> tuple[float, float]:
+    if anchor == "bottom_left":
+        x, y = 0.0, 0.0
+    elif anchor == "bottom_center":
+        x, y = (page_width - element_width) / 2, 0.0
+    elif anchor == "bottom_right":
+        x, y = page_width - element_width, 0.0
+    elif anchor == "middle_left":
+        x, y = 0.0, (page_height - element_height) / 2
+    elif anchor == "center":
+        x, y = (page_width - element_width) / 2, (page_height - element_height) / 2
+    elif anchor == "middle_right":
+        x, y = page_width - element_width, (page_height - element_height) / 2
+    elif anchor == "top_left":
+        x, y = 0.0, page_height - element_height
+    elif anchor == "top_center":
+        x, y = (page_width - element_width) / 2, page_height - element_height
+    elif anchor == "top_right":
+        x, y = page_width - element_width, page_height - element_height
+    else:
+        raise ValueError(f"Unsupported layout element anchor: {anchor}")
+    return x + offset_x, y + offset_y
+
+
+def _make_box(arcpy: Any, xmin: float, ymin: float, xmax: float, ymax: float) -> Any:
+    return arcpy.Polygon(
+        arcpy.Array(
+            [
+                arcpy.Point(xmin, ymin),
+                arcpy.Point(xmax, ymin),
+                arcpy.Point(xmax, ymax),
+                arcpy.Point(xmin, ymax),
+                arcpy.Point(xmin, ymin),
+            ]
+        )
+    )
+
+
+def _style_item(aprx: Any, gallery: str, style_class: str, style_name: str) -> Any:
+    items = aprx.listStyleItems(gallery, style_class, style_name)
+    if not items:
+        raise RuntimeError(f"ArcGIS style item not found: {gallery}/{style_class}/{style_name}")
+    return items[0]
+
+
+def _find_layout_element_optional(layout: Any, element_name: str) -> Any | None:
+    normalized_name = _normalized_layout_name(element_name)
+    for _, element in _layout_elements(layout):
+        name = getattr(element, "name", "")
+        if name == element_name or _normalized_layout_name(name) == normalized_name:
+            return element
+    return None
+
+
+def _set_element_size(element: Any, width: float, height: float) -> None:
+    element.elementWidth = width
+    element.elementHeight = height
+
+
+def _map_frame_has_grid(map_frame: Any, name: str) -> bool:
+    grids = getattr(map_frame, "grids", None)
+    if not grids:
+        return False
+    if not name:
+        return bool(grids)
+    normalized_name = _normalized_layout_name(name)
+    for grid in grids:
+        grid_name = getattr(grid, "name", "")
+        if grid_name == name or _normalized_layout_name(grid_name) == normalized_name:
+            return True
+    return False
+
+
+def _operation_map(aprx: Any, fallback_map: Any, map_name: str | None) -> Any:
+    if not map_name:
+        return fallback_map
+    maps = aprx.listMaps(map_name)
+    if not maps:
+        raise RuntimeError(f"Map not found for inset map frame: {map_name}")
+    return maps[0]
+
+
+def _copy_camera_extent(source_frame: Any, target_frame: Any) -> None:
+    source_camera = getattr(source_frame, "camera", None)
+    target_camera = getattr(target_frame, "camera", None)
+    extent = None
+    if source_camera is not None and hasattr(source_camera, "getExtent"):
+        try:
+            extent = source_camera.getExtent()
+        except Exception:
+            extent = None
+    if extent is not None and target_camera is not None and hasattr(target_camera, "setExtent"):
+        try:
+            target_camera.setExtent(extent)
+        except Exception:
+            pass
+
+
 def _apply_layout_element_positions(
     layout: Any,
     positions: list[LayoutElementPosition],
@@ -349,28 +634,15 @@ def _layout_element_xy(
     element_width = _layout_number(element, "elementWidth")
     element_height = _layout_number(element, "elementHeight")
 
-    if position.anchor == "bottom_left":
-        x, y = 0.0, 0.0
-    elif position.anchor == "bottom_center":
-        x, y = (page_width - element_width) / 2, 0.0
-    elif position.anchor == "bottom_right":
-        x, y = page_width - element_width, 0.0
-    elif position.anchor == "middle_left":
-        x, y = 0.0, (page_height - element_height) / 2
-    elif position.anchor == "center":
-        x, y = (page_width - element_width) / 2, (page_height - element_height) / 2
-    elif position.anchor == "middle_right":
-        x, y = page_width - element_width, (page_height - element_height) / 2
-    elif position.anchor == "top_left":
-        x, y = 0.0, page_height - element_height
-    elif position.anchor == "top_center":
-        x, y = (page_width - element_width) / 2, page_height - element_height
-    elif position.anchor == "top_right":
-        x, y = page_width - element_width, page_height - element_height
-    else:
-        raise ValueError(f"Unsupported layout element anchor: {position.anchor}")
-
-    return x + offset_x, y + offset_y
+    return _anchored_xy(
+        position.anchor,
+        page_width,
+        page_height,
+        element_width,
+        element_height,
+        offset_x,
+        offset_y,
+    )
 
 
 def _layout_number(element: Any, attribute: str) -> float:

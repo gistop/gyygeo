@@ -218,6 +218,60 @@ _EXPERT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                             "additionalProperties": False,
                         },
                     },
+                    "layout_operations": {
+                        "type": "array",
+                        "description": (
+                            "Optional structured cartographic layout operations executed by "
+                            "carto-engine after the generated ArcPy code. Use these to ensure "
+                            "standard map production elements exist, such as scale bars, north "
+                            "arrows, grids, and inset map frames."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": [
+                                        "ensure_scale_bar",
+                                        "ensure_north_arrow",
+                                        "ensure_grid",
+                                        "ensure_inset_map",
+                                    ],
+                                },
+                                "name": {"type": "string"},
+                                "map_frame_name": {"type": "string"},
+                                "map_name": {"type": "string"},
+                                "style_gallery": {"type": "string", "default": "ArcGIS 2D"},
+                                "style_name": {"type": "string"},
+                                "anchor": {
+                                    "type": "string",
+                                    "enum": [
+                                        "bottom_left",
+                                        "bottom_center",
+                                        "bottom_right",
+                                        "middle_left",
+                                        "center",
+                                        "middle_right",
+                                        "top_left",
+                                        "top_center",
+                                        "top_right",
+                                    ],
+                                },
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "offset_x": {"type": "number", "default": 0},
+                                "offset_y": {"type": "number", "default": 0},
+                                "width": {"type": "number"},
+                                "height": {"type": "number"},
+                                "units": {
+                                    "type": "string",
+                                    "enum": ["millimeter", "centimeter", "inch"],
+                                },
+                            },
+                            "required": ["type"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["code"],
                 "additionalProperties": False,
@@ -950,6 +1004,7 @@ def _tool_render_research_area_overview_map(
             "fit_layer_names": ["Remote Sensing Basemap"],
             "fit_padding": map_spec["layout"].get("fit_padding", 0.08),
             "layout_elements": map_spec["layout"].get("layout_elements") or [],
+            "layout_operations": map_spec["layout"].get("layout_operations") or [],
             "page": map_spec["layout"].get("page"),
             "export": {
                 "format": map_spec["output"]["format"],
@@ -1039,6 +1094,7 @@ def _execute_expert_tool_call(
             task.id,
             text_styles=normalized["arguments"].get("text_styles") or [],
             layout_elements=normalized["arguments"].get("layout_elements") or [],
+            layout_operations=normalized["arguments"].get("layout_operations") or [],
         )
     raise ValueError(f"Unknown expert tool: {normalized['name']}")
 
@@ -1100,6 +1156,7 @@ def _tool_run_arcpy_code(
     *,
     text_styles: List[Dict[str, Any]],
     layout_elements: List[Dict[str, Any]],
+    layout_operations: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     output = map_spec.get("output") or {}
     code = _ensure_prepared_dataset_loaded(code, map_spec)
@@ -1112,6 +1169,7 @@ def _tool_run_arcpy_code(
         "dpi": output.get("dpi") or 300,
         "text_styles": text_styles,
         "layout_elements": layout_elements,
+        "layout_operations": layout_operations,
         "context": map_spec.get("context") or {},
         "metadata": {
             "agent_task_id": task_id,
@@ -1197,6 +1255,7 @@ def _create_run_arcpy_code_tool_call(
     template_id: str = "default",
     text_styles: Optional[List[Dict[str, Any]]] = None,
     layout_elements: Optional[List[Dict[str, Any]]] = None,
+    layout_operations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     arguments: Dict[str, Any] = {
         "code": code,
@@ -1208,6 +1267,8 @@ def _create_run_arcpy_code_tool_call(
         arguments["text_styles"] = text_styles
     if layout_elements:
         arguments["layout_elements"] = layout_elements
+    if layout_operations:
+        arguments["layout_operations"] = layout_operations
     return _normalize_expert_tool_call(
         {
             "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
@@ -1366,8 +1427,13 @@ def _normalize_expert_run_arcpy_arguments(arguments: Dict[str, Any]) -> Dict[str
     if not template_id:
         raise ValueError("Expert tool template_id cannot be empty.")
 
+    layout_operations = _normalize_layout_operations(arguments.get("layout_operations"))
+    repaired_code = _repair_generated_arcpy_code(
+        _strip_generated_layout_operation_blocks(code.strip(), layout_operations)
+    )
+
     normalized_arguments: Dict[str, Any] = {
-        "code": _repair_generated_arcpy_code(code.strip()),
+        "code": repaired_code,
         "output_format": output_format,
         "dpi": dpi,
         "template_id": template_id,
@@ -1378,6 +1444,8 @@ def _normalize_expert_run_arcpy_arguments(arguments: Dict[str, Any]) -> Dict[str
     layout_elements = _normalize_layout_elements(arguments.get("layout_elements"))
     if layout_elements:
         normalized_arguments["layout_elements"] = layout_elements
+    if layout_operations:
+        normalized_arguments["layout_operations"] = layout_operations
 
     return {
         "name": _EXPERT_TOOL_RUN_ARCPY_CODE,
@@ -1491,6 +1559,92 @@ def _normalize_layout_elements(value: Any) -> List[Dict[str, Any]]:
     return elements
 
 
+def _normalize_layout_operations(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("run_arcpy_code layout_operations must be a list.")
+
+    allowed_types = {
+        "ensure_scale_bar",
+        "ensure_north_arrow",
+        "ensure_grid",
+        "ensure_inset_map",
+    }
+    allowed_anchors = {
+        "bottom_left",
+        "bottom_center",
+        "bottom_right",
+        "middle_left",
+        "center",
+        "middle_right",
+        "top_left",
+        "top_center",
+        "top_right",
+    }
+    allowed_units = {"millimeter", "centimeter", "inch"}
+    operations = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Each run_arcpy_code layout operation must be an object.")
+        operation_type = str(item.get("type") or "").strip().lower()
+        if operation_type not in allowed_types:
+            raise ValueError(f"Unsupported run_arcpy_code layout operation type: {item.get('type')}")
+        operation: Dict[str, Any] = {"type": operation_type}
+
+        for key in ("name", "map_frame_name", "map_name", "style_gallery", "style_name"):
+            field_value = item.get(key)
+            if isinstance(field_value, str) and field_value.strip():
+                operation[key] = field_value.strip()
+
+        anchor = item.get("anchor")
+        if anchor is not None:
+            anchor_value = str(anchor).strip().lower()
+            if anchor_value not in allowed_anchors:
+                raise ValueError(f"Unsupported run_arcpy_code layout operation anchor: {anchor}")
+            operation["anchor"] = anchor_value
+
+        has_x = item.get("x") is not None
+        has_y = item.get("y") is not None
+        if has_x != has_y:
+            raise ValueError("run_arcpy_code layout operation requires both x and y.")
+        if has_x and has_y:
+            operation["x"] = _coerce_float(item.get("x"), "run_arcpy_code layout operation x")
+            operation["y"] = _coerce_float(item.get("y"), "run_arcpy_code layout operation y")
+
+        if "anchor" in operation and ("x" in operation or "y" in operation):
+            raise ValueError("Use either anchor or x/y for a run_arcpy_code layout operation.")
+
+        has_width = item.get("width") is not None
+        has_height = item.get("height") is not None
+        if has_width != has_height:
+            raise ValueError("run_arcpy_code layout operation width/height requires both values.")
+        if has_width and has_height:
+            operation["width"] = _coerce_float(
+                item.get("width"),
+                "run_arcpy_code layout operation width",
+            )
+            operation["height"] = _coerce_float(
+                item.get("height"),
+                "run_arcpy_code layout operation height",
+            )
+            if operation["width"] <= 0 or operation["height"] <= 0:
+                raise ValueError("run_arcpy_code layout operation width/height must be positive.")
+
+        for key in ("offset_x", "offset_y"):
+            if item.get(key) is not None:
+                operation[key] = _coerce_float(item.get(key), f"run_arcpy_code layout operation {key}")
+
+        units = item.get("units")
+        if units is not None:
+            units_value = str(units).strip().lower()
+            if units_value not in allowed_units:
+                raise ValueError(f"Unsupported run_arcpy_code layout operation units: {units}")
+            operation["units"] = units_value
+        operations.append(operation)
+    return operations
+
+
 def _coerce_float(value: Any, field_name: str) -> float:
     try:
         return float(value)
@@ -1502,6 +1656,70 @@ class _CreateTextElementRepairer(ast.NodeTransformer):
     def visit_Call(self, node: ast.Call) -> ast.AST:
         self.generic_visit(node)
         if not isinstance(node.func, ast.Attribute) or node.func.attr != "createTextElement":
+            return node
+
+        if (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "aprx"
+            and len(node.args) == 2
+            and isinstance(node.args[1], ast.Dict)
+        ):
+            keywords = list(node.keywords)
+            if not _has_keyword(keywords, "name"):
+                keywords.append(ast.keyword(arg="name", value=ast.Constant(value="Title")))
+            if not _has_keyword(keywords, "text_size"):
+                keywords.append(ast.keyword(arg="text_size", value=ast.Constant(value=24)))
+            node.args = [
+                ast.Name(id="layout", ctx=ast.Load()),
+                _point_from_position_dict(node.args[1]),
+                ast.Constant(value="POINT"),
+                node.args[0],
+            ]
+            node.keywords = keywords
+            return node
+
+        if (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "layout"
+            and len(node.args) >= 2
+            and _string_constant(node.args[1])
+        ):
+            keywords = list(node.keywords)
+            if not _has_keyword(keywords, "name"):
+                keywords.append(ast.keyword(arg="name", value=node.args[1]))
+            if not _has_keyword(keywords, "text_size"):
+                keywords.append(ast.keyword(arg="text_size", value=ast.Constant(value=24)))
+            node.func = ast.Attribute(
+                value=ast.Name(id="aprx", ctx=ast.Load()),
+                attr="createTextElement",
+                ctx=ast.Load(),
+            )
+            node.args = [
+                ast.Name(id="layout", ctx=ast.Load()),
+                ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name(id="arcpy", ctx=ast.Load()),
+                        attr="Point",
+                        ctx=ast.Load(),
+                    ),
+                    args=[
+                        ast.BinOp(
+                            left=ast.Name(id="page_width", ctx=ast.Load()),
+                            op=ast.Div(),
+                            right=ast.Constant(value=2.0),
+                        ),
+                        ast.BinOp(
+                            left=ast.Name(id="page_height", ctx=ast.Load()),
+                            op=ast.Sub(),
+                            right=ast.Constant(value=0.35),
+                        ),
+                    ],
+                    keywords=[],
+                ),
+                ast.Constant(value="POINT"),
+                node.args[0],
+            ]
+            node.keywords = keywords
             return node
 
         if len(node.args) >= 4 and _string_constant(node.args[1]) == "TEXT":
@@ -1552,8 +1770,84 @@ def _repair_title_layout_units(code: str) -> str:
     return re.sub(r"(page_height\s*-\s*)28(?:\.0)?\b", r"\g<1>0.35", code)
 
 
+def _strip_generated_layout_operation_blocks(
+    code: str,
+    layout_operations: List[Dict[str, Any]],
+) -> str:
+    if not layout_operations:
+        return code
+
+    operation_types = {str(operation.get("type") or "") for operation in layout_operations}
+    start_patterns = []
+    if "ensure_scale_bar" in operation_types:
+        start_patterns.extend(("scale_bar_matches =", "scale_bar ="))
+    if "ensure_north_arrow" in operation_types:
+        start_patterns.extend(("na_matches =", "north_arrow_matches =", "north_arrow ="))
+    if "ensure_inset_map" in operation_types:
+        start_patterns.extend(("inset_matches =", "inset_mf =", "inset_frame_matches =", "inset_frame ="))
+    if "ensure_grid" in operation_types:
+        start_patterns.extend(("grids =", "grid_matches ="))
+    if not start_patterns:
+        return code
+
+    end_patterns = (
+        "title_text =",
+        "title_matches =",
+        "aprx.save(",
+        "layout.export",
+        "del aprx",
+    )
+    kept_lines = []
+    skipping = False
+    for line in code.splitlines():
+        stripped = line.strip()
+        is_top_level = line == line.lstrip()
+        if skipping:
+            if is_top_level and stripped.startswith(end_patterns):
+                skipping = False
+            else:
+                continue
+        if is_top_level and stripped.startswith(tuple(start_patterns)):
+            skipping = True
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines)
+
+
 def _string_constant(node: ast.AST) -> Optional[str]:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _point_from_position_dict(node: ast.Dict) -> ast.Call:
+    values: dict[str, ast.AST] = {}
+    for key, value in zip(node.keys, node.values):
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            values[key.value] = value
+    x_value = values.get(
+        "x",
+        ast.BinOp(
+            left=ast.Name(id="page_width", ctx=ast.Load()),
+            op=ast.Div(),
+            right=ast.Constant(value=2.0),
+        ),
+    )
+    y_value = values.get(
+        "y",
+        ast.BinOp(
+            left=ast.Name(id="page_height", ctx=ast.Load()),
+            op=ast.Sub(),
+            right=ast.Constant(value=0.35),
+        ),
+    )
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id="arcpy", ctx=ast.Load()),
+            attr="Point",
+            ctx=ast.Load(),
+        ),
+        args=[x_value, y_value],
+        keywords=[],
+    )
 
 
 def _has_keyword(keywords: List[ast.keyword], name: str) -> bool:
@@ -1792,6 +2086,10 @@ def _generate_expert_tool_calls(
         "for the north arrow when those template element names are requested. For natural "
         "positions, use layout_elements anchor values such as bottom_left, top_right, or "
         "top_center, with offset_x/offset_y and units for requests such as moving up 1 cm.\n\n"
+        "For creating or ensuring standard map production elements, prefer the run_arcpy_code "
+        "layout_operations argument instead of hand-writing ArcPy surround code. Use "
+        "ensure_scale_bar, ensure_north_arrow, ensure_grid, and ensure_inset_map for scale bars, "
+        "north arrows, map grids, and inset map frames.\n\n"
         "Use the following project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -2000,6 +2298,9 @@ def _generate_expert_run_arcpy_tool_call(
         "run_arcpy_code layout_elements argument when returning tool calls. Natural positions "
         "should use anchors such as bottom_left, top_right, or top_center, with offset_x/offset_y "
         "and units for requests such as moving up 1 cm.\n\n"
+        "For creating or ensuring standard map production elements, prefer the run_arcpy_code "
+        "layout_operations argument. Use ensure_scale_bar, ensure_north_arrow, ensure_grid, "
+        "and ensure_inset_map for scale bars, north arrows, map grids, and inset map frames.\n\n"
         "Use this project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -2246,6 +2547,14 @@ def _deepseek_chat_completion(
         raise HTTPException(status_code=exc.code, detail=detail) from exc
     except urllib.error.URLError as exc:
         raise HTTPException(status_code=502, detail=f"DeepSeek request failed: {exc}") from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "DeepSeek request timed out while reading the response. "
+                "Try again, or increase GYYGEO_WEB_API_DEEPSEEK_TIMEOUT_SECONDS."
+            ),
+        ) from exc
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=502, detail="DeepSeek returned invalid JSON.") from exc
 
