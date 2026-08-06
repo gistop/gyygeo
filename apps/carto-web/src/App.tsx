@@ -81,7 +81,7 @@ interface PreviewRasterLayer {
 }
 
 type WorkflowTabId = "data" | "processing" | "cartography";
-type BaseLayer = "streets" | "esri-world-imagery";
+type BaseLayer = "streets" | "esri-world-imagery" | "tianditu-vector";
 type LayoutTool = "select" | "pan";
 type LayoutPaperId = "a4-landscape" | "a4-portrait" | "custom-145x100";
 type LayoutAdornmentId = "north-arrow" | "scale-bar";
@@ -102,6 +102,11 @@ const tileOffsetMax = 2;
 const minMapFrameSizeMm = 24;
 const rulerGutterMm = 30;
 const offsetTileProtocol = "gyygeo-offset-tile";
+const baseLayerOptions: Array<{ id: BaseLayer; label: string }> = [
+  { id: "streets", label: "街道底图" },
+  { id: "esri-world-imagery", label: "Esri World Imagery" },
+  { id: "tianditu-vector", label: "天地图矢量" },
+];
 const offsetTileImageCache = new Map<string, Promise<ImageBitmap | null>>();
 const offsetTileDataCache = new Map<string, Promise<ArrayBuffer>>();
 let isOffsetTileProtocolRegistered = false;
@@ -994,22 +999,17 @@ function CartographyWorkspace({
           <span>底图</span>
         </div>
         <div className="base-layer-grid">
-          <button
-            className={baseLayer === "streets" ? "base-layer-button active" : "base-layer-button"}
-            onClick={() => onBaseLayerChange("streets")}
-            type="button"
-          >
-            <span>街道底图</span>
-            {baseLayer === "streets" ? <Check size={15} /> : null}
-          </button>
-          <button
-            className={baseLayer === "esri-world-imagery" ? "base-layer-button active" : "base-layer-button"}
-            onClick={() => onBaseLayerChange("esri-world-imagery")}
-            type="button"
-          >
-            <span>Esri World Imagery</span>
-            {baseLayer === "esri-world-imagery" ? <Check size={15} /> : null}
-          </button>
+          {baseLayerOptions.map((option) => (
+            <button
+              className={baseLayer === option.id ? "base-layer-button active" : "base-layer-button"}
+              key={option.id}
+              onClick={() => onBaseLayerChange(option.id)}
+              type="button"
+            >
+              <span>{option.label}</span>
+              {baseLayer === option.id ? <Check size={15} /> : null}
+            </button>
+          ))}
         </div>
       </section>
 
@@ -1298,28 +1298,20 @@ function MapPanel({
           </button>
           {isLayerMenuOpen ? (
             <div className="map-layer-menu" role="menu">
-              <button
-                onClick={() => {
-                  onBaseLayerChange("streets");
-                  setIsLayerMenuOpen(false);
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <span>街道底图</span>
-                {baseLayer === "streets" ? <Check size={15} /> : null}
-              </button>
-              <button
-                onClick={() => {
-                  onBaseLayerChange("esri-world-imagery");
-                  setIsLayerMenuOpen(false);
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <span>Esri World Imagery</span>
-                {baseLayer === "esri-world-imagery" ? <Check size={15} /> : null}
-              </button>
+              {baseLayerOptions.map((option) => (
+                <button
+                  key={option.id}
+                  onClick={() => {
+                    onBaseLayerChange(option.id);
+                    setIsLayerMenuOpen(false);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <span>{option.label}</span>
+                  {baseLayer === option.id ? <Check size={15} /> : null}
+                </button>
+              ))}
             </div>
           ) : null}
         </div>
@@ -2346,29 +2338,82 @@ function createOffsetTileUrl(tileTemplate: string, tileOffset: number) {
 }
 
 function createMapStyle(baseLayer: BaseLayer, tileOffset = 0): StyleSpecification {
-  const isImagery = baseLayer === "esri-world-imagery";
-  const tileTemplate = isImagery
-    ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-    : "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+  if (baseLayer === "tianditu-vector") {
+    return {
+      version: 8,
+      sources: {
+        "tianditu-vector": {
+          type: "raster",
+          tiles: [createOffsetTileUrl(`${config.cartoWebApiUrl}/api/v1/tiles/tianditu/vec_w/{z}/{x}/{y}`, tileOffset)],
+          tileSize,
+          maxzoom: 18,
+          attribution: "© 天地图",
+        },
+        "tianditu-label": {
+          type: "raster",
+          tiles: [createOffsetTileUrl(`${config.cartoWebApiUrl}/api/v1/tiles/tianditu/cva_w/{z}/{x}/{y}`, tileOffset)],
+          tileSize,
+          maxzoom: 18,
+          attribution: "© 天地图",
+        },
+      },
+      layers: [
+        {
+          id: "tianditu-vector",
+          type: "raster",
+          source: "tianditu-vector",
+        },
+        {
+          id: "tianditu-label",
+          type: "raster",
+          source: "tianditu-label",
+        },
+      ],
+    };
+  }
+
+  const baseLayerConfig = getBaseLayerConfig(baseLayer);
 
   return {
     version: 8,
     sources: {
       base: {
         type: "raster",
-        tiles: [createOffsetTileUrl(tileTemplate, tileOffset)],
+        tiles: [createOffsetTileUrl(baseLayerConfig.tileTemplate, tileOffset)],
         tileSize,
-        maxzoom: 19,
-        attribution: isImagery ? "Tiles © Esri" : "© OpenStreetMap contributors",
+        maxzoom: baseLayerConfig.maxzoom,
+        attribution: baseLayerConfig.attribution,
       },
     },
     layers: [
       {
-        id: isImagery ? "esri-world-imagery" : "osm-standard",
+        id: baseLayerConfig.layerId,
         type: "raster",
         source: "base",
       },
     ],
+  };
+}
+
+function getBaseLayerConfig(baseLayer: BaseLayer): {
+  attribution: string;
+  layerId: string;
+  maxzoom: number;
+  tileTemplate: string;
+} {
+  if (baseLayer === "esri-world-imagery") {
+    return {
+      attribution: "Tiles © Esri",
+      layerId: "esri-world-imagery",
+      maxzoom: 19,
+      tileTemplate: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    };
+  }
+  return {
+    attribution: "© OpenStreetMap contributors",
+    layerId: "osm-standard",
+    maxzoom: 19,
+    tileTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   };
 }
 

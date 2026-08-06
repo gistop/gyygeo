@@ -26,6 +26,16 @@ def _csv_env(name: str, default: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _secret_env(name: str, placeholders: set[str]) -> Optional[str]:
+    raw = _env(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or value in placeholders:
+        return None
+    return value
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -53,6 +63,9 @@ class Settings:
     cors_origins: list[str]
     data_service_url: str
     carto_engine_url: str
+    tianditu_token: Optional[str]
+    tianditu_cva_w_wmts_url: str
+    tianditu_vec_w_wmts_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -96,6 +109,24 @@ class Settings:
                 _env("GYYGEO_WEB_API_CARTO_ENGINE_URL", "http://127.0.0.1:8000")
                 or "http://127.0.0.1:8000"
             ).rstrip("/"),
+            tianditu_token=_secret_env(
+                "GYYGEO_WEB_API_TIANDITU_TOKEN",
+                {"您的密钥", "your-token", "your-token-here"},
+            ),
+            tianditu_cva_w_wmts_url=(
+                _env(
+                    "GYYGEO_WEB_API_TIANDITU_CVA_W_WMTS_URL",
+                    "http://t0.tianditu.gov.cn/cva_w/wmts",
+                )
+                or "http://t0.tianditu.gov.cn/cva_w/wmts"
+            ),
+            tianditu_vec_w_wmts_url=(
+                _env(
+                    "GYYGEO_WEB_API_TIANDITU_VEC_W_WMTS_URL",
+                    "http://t0.tianditu.gov.cn/vec_w/wmts",
+                )
+                or "http://t0.tianditu.gov.cn/vec_w/wmts"
+            ),
         )
 
 
