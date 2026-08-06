@@ -10,6 +10,17 @@ layout.listElements("TEXT_ELEMENT")
 
 The default template currently has a north arrow named `zbz`.
 
+For generated expert tool calls, use `layout_operations` for standard map surrounds:
+
+- `ensure_scale_bar`
+- `ensure_north_arrow`
+- `ensure_grid`
+- `ensure_inset_map`
+
+If one of these operations is present in `layout_operations`, do not hand-write helper functions
+or direct ArcPy calls for the same operation in `run_arcpy_code`. The carto-engine applies these
+operations after the base script succeeds.
+
 Move an existing element:
 
 ```python

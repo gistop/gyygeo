@@ -18,12 +18,14 @@ from app.api.routes.agent import (
     _create_task,
     _execute_expert_tool_call,
     _ensure_prepared_dataset_loaded,
+    _expert_tool_calls_from_user_message,
     _extract_layout_elements,
     _extract_layout_page,
     _is_supported_agent_request,
     _normalize_expert_tool_call,
     _parse_expert_tool_call_content,
     _repair_generated_arcpy_code,
+    _select_expert_knowledge_files,
     _strip_generated_layout_operation_blocks,
     _tool_render_research_area_overview_map,
     _tool_call_with_selected_item,
@@ -531,6 +533,56 @@ def test_complete_expert_tool_calls_backfills_prepare_and_run(monkeypatch) -> No
     ]
 
 
+def test_expert_remote_sensing_map_request_defers_code_generation(monkeypatch) -> None:
+    context = AgentPageContext(
+        collection="sentinel-2-l2a",
+        bbox=[116.3, 39.85, 116.45, 39.95],
+    )
+
+    monkeypatch.setattr(
+        "app.api.routes.agent._generate_expert_tool_calls",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("DeepSeek should not run")),
+    )
+
+    tool_calls = _expert_tool_calls_from_user_message(
+        "生成该区域的遥感影像图，指北针放中间，比例尺放左上角，添加格网，导出为jpg",
+        context,
+        object(),
+    )
+
+    assert [call["name"] for call in tool_calls] == [
+        "search_remote_sensing_images",
+        "prepare_remote_sensing_basemap",
+    ]
+    assert tool_calls[0]["arguments"]["collection"] == "sentinel-2-l2a"
+    assert tool_calls[0]["arguments"]["bbox"] == [116.3, 39.85, 116.45, 39.95]
+
+
+def test_create_expert_task_tracks_deferred_run_arcpy_step() -> None:
+    context = AgentPageContext(
+        collection="sentinel-2-l2a",
+        bbox=[116.3, 39.85, 116.45, 39.95],
+    )
+
+    task = _create_expert_task(
+        "生成该区域的遥感影像图，指北针放中间，比例尺放左上角，添加格网，导出为jpg",
+        context,
+        [
+            {"name": "search_remote_sensing_images", "arguments": {}},
+            {"name": "prepare_remote_sensing_basemap", "arguments": {}},
+        ],
+    )
+
+    assert task.outputs["deferred_run_arcpy"] is True
+    assert [step.name for step in task.steps] == [
+        "search_remote_sensing_images",
+        "select_remote_sensing_image",
+        "prepare_remote_sensing_basemap",
+        "run_arcpy_code",
+        "check_expert_output",
+    ]
+
+
 def test_data_acquisition_skill_builds_search_payload_and_pending_action() -> None:
     payload = build_search_payload(
         {
@@ -697,6 +749,36 @@ title = layout.createTextElement(title_text, 'Title')
     assert "name='Title'" in repaired
 
 
+def test_repair_generated_arcpy_code_fixes_layout_point_text_signature() -> None:
+    repaired = _repair_generated_arcpy_code(
+        """
+import arcpy
+aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+layout = aprx.listLayouts()[0]
+def ensure_title(layout, text):
+    title = layout.createTextElement(
+        arcpy.Point(layout.pageWidth / 2, layout.pageHeight - 0.5),
+        text,
+        'POINT'
+    )
+    return title
+"""
+    )
+
+    assert (
+        "aprx.createTextElement(layout, arcpy.Point(layout.pageWidth / 2, "
+        "layout.pageHeight - 0.5), 'POINT', text"
+    ) in repaired
+    assert "name='Title'" in repaired
+
+
+def test_expert_knowledge_always_includes_layout_text_runtime_rules() -> None:
+    files = _select_expert_knowledge_files("生成该区域的遥感影像图，导出为jpg")
+
+    assert "arcpy_layout_text.md" in files
+    assert "arcpy_layout_elements.md" in files
+
+
 def test_repair_generated_arcpy_code_fixes_aprx_text_element_position_dict() -> None:
     repaired = _repair_generated_arcpy_code(
         """
@@ -755,6 +837,48 @@ aprx.save()
     assert "createMapGrid" not in stripped
     assert "title_text = CONTEXT.get" in stripped
     assert "aprx.save()" in stripped
+
+
+def test_strip_generated_layout_operation_blocks_removes_helper_functions() -> None:
+    stripped = _strip_generated_layout_operation_blocks(
+        """
+import arcpy
+aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+layout = aprx.listLayouts()[0]
+map_frame = layout.listElements('MAPFRAME_ELEMENT')[0]
+
+def ensure_grid(mf):
+    for method_name in ['addMapGrid', 'addGrid']:
+        if hasattr(mf, method_name):
+            return getattr(mf, method_name)('Graticule')
+    raise RuntimeError('Failed to add map grid')
+
+def ensure_scale_bar(lyt, mf):
+    return lyt.addMapSurround(mf, 'Scale Bar', 'Scale Bar')
+
+def keep_extent():
+    map_frame.camera.scale = 10000
+
+grid = ensure_grid(map_frame)
+scale_bar = ensure_scale_bar(layout, map_frame)
+keep_extent()
+aprx.save()
+layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)
+""",
+        [
+            {"type": "ensure_scale_bar"},
+            {"type": "ensure_grid"},
+        ],
+    )
+
+    assert "def ensure_grid" not in stripped
+    assert "def ensure_scale_bar" not in stripped
+    assert "ensure_grid(map_frame)" not in stripped
+    assert "ensure_scale_bar(layout, map_frame)" not in stripped
+    assert "def keep_extent" in stripped
+    assert "keep_extent()" in stripped
+    assert "aprx.save()" in stripped
+    assert "layout.exportToJPEG" in stripped
 
 
 def test_ensure_prepared_dataset_loaded_injects_missing_raster_layer() -> None:

@@ -6,6 +6,12 @@ Verified fact for ArcPy `3.6.1` in this workspace:
 - `createTextElement` does not exist on `Layout`.
 - `createMapTitle` is not available on `Layout` or `MapFrame`.
 
+Hard rule for generated expert code:
+
+- Never call `layout.createTextElement(...)`.
+- Always call `aprx.createTextElement(layout, arcpy.Point(x, y), "POINT", text, ...)`.
+- Keep this rule even inside helper functions such as `ensure_title(...)`.
+
 Use this API to create layout text:
 
 ```python

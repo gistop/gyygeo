@@ -78,6 +78,7 @@ interface PreviewRasterLayer {
   label: string;
   tilejson: TilejsonResponse;
   bounds?: Bbox;
+  opacity: number;
 }
 
 type WorkflowTabId = "data" | "processing" | "cartography";
@@ -247,10 +248,17 @@ export function App() {
           label: item.item_id,
           tilejson: response,
           bounds: validBbox(response.bounds) ?? validBbox(item.bbox),
+          opacity: 0.74,
         },
       ]);
     },
   });
+
+  const updatePreviewOpacity = useCallback((itemId: string, opacity: number) => {
+    setPreviewLayers((current) =>
+      current.map((layer) => (layer.itemId === itemId ? { ...layer, opacity } : layer)),
+    );
+  }, []);
 
   const prepareMutation = useMutation({
     mutationFn: (item?: SearchItem) => {
@@ -547,7 +555,8 @@ export function App() {
                   ) : (
                     items.map((item) => {
                       const isSelected = selectedItem?.item_id === item.item_id;
-                      const isPreviewed = previewLayers.some((layer) => layer.itemId === item.item_id);
+                      const previewLayer = previewLayers.find((layer) => layer.itemId === item.item_id);
+                      const isPreviewed = Boolean(previewLayer);
                       const isPreviewLoading =
                         previewMutation.isPending && previewMutation.variables?.item_id === item.item_id;
                       return (
@@ -579,6 +588,21 @@ export function App() {
                               <Eye className={isPreviewed ? "filled-eye" : ""} size={16} />
                             )}
                           </button>
+                          {previewLayer ? (
+                            <label className="item-opacity-control">
+                              <span>透明度 {Math.round(previewLayer.opacity * 100)}%</span>
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="5"
+                                value={Math.round(previewLayer.opacity * 100)}
+                                onChange={(event) =>
+                                  updatePreviewOpacity(item.item_id, Number(event.currentTarget.value) / 100)
+                                }
+                              />
+                            </label>
+                          ) : null}
                         </div>
                       );
                     })
@@ -1146,7 +1170,7 @@ function MapPanel({
       return;
     }
 
-    const syncPreviewLayers = () => syncPreviewRasterLayers(map, previewLayers, true);
+    const syncPreviewLayers = () => syncPreviewRasterLayers(map, previewLayers, false);
 
     if (map.isStyleLoaded()) {
       syncPreviewLayers();
@@ -2158,11 +2182,13 @@ function syncPreviewRasterLayers(map: MapLibreMap, previewLayers: PreviewRasterL
           type: "raster",
           source: sourceId,
           paint: {
-            "raster-opacity": 0.74,
+            "raster-opacity": layer.opacity,
           },
         },
         map.getLayer("aoi-fill") ? "aoi-fill" : undefined,
       );
+    } else {
+      map.setPaintProperty(layerId, "raster-opacity", layer.opacity);
     }
   }
 

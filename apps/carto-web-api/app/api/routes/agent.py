@@ -561,6 +561,11 @@ def _create_expert_task(
     tool_calls = _normalize_expert_tool_calls(tool_call)
     run_tool_call = _find_expert_tool_call(tool_calls, _EXPERT_TOOL_RUN_ARCPY_CODE)
     run_arguments = run_tool_call["arguments"] if run_tool_call else {}
+    deferred_run_arcpy = (
+        run_tool_call is None
+        and _expert_tool_calls_need_image_selection(tool_calls)
+        and _expert_message_requests_map_output(message)
+    )
     template_id = str(run_arguments.get("template_id") or "default")
     output_format = str(run_arguments.get("output_format") or "jpg")
     dpi = int(run_arguments.get("dpi") or 300)
@@ -593,6 +598,9 @@ def _create_expert_task(
         steps.insert(search_index + 1, AgentStep(name="select_remote_sensing_image"))
     if run_tool_call:
         steps.append(AgentStep(name="check_expert_output"))
+    elif deferred_run_arcpy:
+        steps.append(AgentStep(name=_EXPERT_TOOL_RUN_ARCPY_CODE))
+        steps.append(AgentStep(name="check_expert_output"))
     task = AgentTask(
         id=task_id,
         kind="expert_tool_call",
@@ -602,7 +610,11 @@ def _create_expert_task(
         message="Expert internal tool task queued.",
         map_spec=map_spec,
         steps=steps,
-        outputs={"tool_calls": tool_calls},
+        outputs={
+            "tool_calls": tool_calls,
+            "user_message": message,
+            "deferred_run_arcpy": deferred_run_arcpy,
+        },
     )
     _save_task(task)
     return task
@@ -763,7 +775,7 @@ def _expert_graph_continue_with_image(task_id: str, item_id: str) -> None:
     _set_task_status(task, "running", f"Continuing expert map task with image {item_id}.")
 
     run_result = None
-    for tool_call in task.outputs["tool_calls"]:
+    for tool_call in list(task.outputs["tool_calls"]):
         if tool_call["name"] == _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES:
             continue
         next_call = _tool_call_with_selected_item(tool_call, item_id)
@@ -776,6 +788,16 @@ def _expert_graph_continue_with_image(task_id: str, item_id: str) -> None:
         if next_call["name"] == _EXPERT_TOOL_RUN_ARCPY_CODE:
             run_result = result
 
+    if run_result is None and task.outputs.get("deferred_run_arcpy"):
+        run_call = _generate_deferred_expert_run_arcpy_tool_call(task, settings)
+        _append_deferred_expert_run_arcpy_tool_call(task, run_call)
+        run_result = _run_step(
+            task,
+            _EXPERT_TOOL_RUN_ARCPY_CODE,
+            lambda: _execute_expert_tool_call(task, run_call, settings),
+        )
+        _merge_task_outputs(task, _expert_tool_output(_EXPERT_TOOL_RUN_ARCPY_CODE, run_result))
+
     if run_result is not None:
         check_result = _run_step(
             task,
@@ -785,6 +807,56 @@ def _expert_graph_continue_with_image(task_id: str, item_id: str) -> None:
         _merge_task_outputs(task, {"qa": check_result})
     _set_task_status(task, "done", "Expert map task completed with the selected image.")
     _forget_expert_graph_settings(task_id)
+
+
+def _generate_deferred_expert_run_arcpy_tool_call(
+    task: AgentTask,
+    settings: Any,
+) -> Dict[str, Any]:
+    context = _expert_page_context_from_task(task)
+    message = str(task.outputs.get("user_message") or "")
+    run_call = _generate_expert_run_arcpy_tool_call(message, context, settings)
+    tool_calls = _apply_context_layout_elements_to_expert_tool_calls(context, [run_call])
+    tool_calls = _apply_cartographic_standards_to_expert_tool_calls(message, tool_calls)
+    return _normalize_expert_tool_call(tool_calls[0])
+
+
+def _expert_page_context_from_task(task: AgentTask) -> Optional[AgentPageContext]:
+    context = task.map_spec.get("context")
+    if not isinstance(context, dict) or not context:
+        return None
+    return AgentPageContext.model_validate(context)
+
+
+def _append_deferred_expert_run_arcpy_tool_call(
+    task: AgentTask,
+    run_call: Dict[str, Any],
+) -> None:
+    tool_calls = list(task.outputs.get("tool_calls") or [])
+    tool_calls.append(run_call)
+    task.outputs = {
+        **task.outputs,
+        "tool_calls": tool_calls,
+        "deferred_run_arcpy": False,
+    }
+    task.map_spec["tool_calls"] = [
+        {
+            "name": call["name"],
+            "arguments": _redact_expert_tool_arguments(call["arguments"]),
+        }
+        for call in tool_calls
+    ]
+    run_step = _find_step(task, _EXPERT_TOOL_RUN_ARCPY_CODE)
+    run_step.input = {
+        "tool_name": run_call["name"],
+        "arguments": _redact_expert_tool_arguments(run_call["arguments"]),
+    }
+    output = task.map_spec.get("output") or {}
+    output["format"] = run_call["arguments"].get("output_format") or output.get("format") or "jpg"
+    output["dpi"] = run_call["arguments"].get("dpi") or output.get("dpi") or 300
+    task.map_spec["output"] = output
+    task.updated_at = _now()
+    _save_task(task)
 
 
 def _run_step(task: AgentTask, name: str, fn: Any) -> Dict[str, Any]:
@@ -1244,6 +1316,8 @@ def _expert_tool_calls_from_user_message(
             message,
             tool_calls,
         )
+    if _expert_message_should_defer_map_code_until_image_selection(message, context):
+        return _build_expert_image_selection_stage_tool_calls(context)
     return _generate_expert_tool_calls(message, context, settings)
 
 
@@ -1681,6 +1755,31 @@ class _CreateTextElementRepairer(ast.NodeTransformer):
         if (
             isinstance(node.func.value, ast.Name)
             and node.func.value.id == "layout"
+            and len(node.args) >= 3
+            and (_string_constant(node.args[2]) or "").upper() in {"POINT", "TEXT"}
+        ):
+            keywords = list(node.keywords)
+            if not _has_keyword(keywords, "name"):
+                keywords.append(ast.keyword(arg="name", value=ast.Constant(value="Title")))
+            if not _has_keyword(keywords, "text_size"):
+                keywords.append(ast.keyword(arg="text_size", value=ast.Constant(value=24)))
+            node.func = ast.Attribute(
+                value=ast.Name(id="aprx", ctx=ast.Load()),
+                attr="createTextElement",
+                ctx=ast.Load(),
+            )
+            node.args = [
+                ast.Name(id="layout", ctx=ast.Load()),
+                node.args[0],
+                ast.Constant(value="POINT"),
+                node.args[1],
+            ]
+            node.keywords = keywords
+            return node
+
+        if (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "layout"
             and len(node.args) >= 2
             and _string_constant(node.args[1])
         ):
@@ -1778,6 +1877,7 @@ def _strip_generated_layout_operation_blocks(
         return code
 
     operation_types = {str(operation.get("type") or "") for operation in layout_operations}
+    code = _strip_generated_layout_operation_helpers(code, operation_types)
     start_patterns = []
     if "ensure_scale_bar" in operation_types:
         start_patterns.extend(("scale_bar_matches =", "scale_bar ="))
@@ -1812,6 +1912,101 @@ def _strip_generated_layout_operation_blocks(
             continue
         kept_lines.append(line)
     return "\n".join(kept_lines)
+
+
+class _LayoutOperationStripper(ast.NodeTransformer):
+    def __init__(self, operation_types: set[str]) -> None:
+        self.strip_names: set[str] = set()
+        if "ensure_grid" in operation_types:
+            self.strip_names.update(
+                {
+                    "ensure_grid",
+                    "add_grid",
+                    "create_grid",
+                    "create_map_grid",
+                    "add_map_grid",
+                }
+            )
+        if "ensure_scale_bar" in operation_types:
+            self.strip_names.update(
+                {
+                    "ensure_scale_bar",
+                    "add_scale_bar",
+                    "create_scale_bar",
+                    "add_scalebar",
+                    "create_scalebar",
+                }
+            )
+        if "ensure_north_arrow" in operation_types:
+            self.strip_names.update(
+                {
+                    "ensure_north_arrow",
+                    "add_north_arrow",
+                    "create_north_arrow",
+                }
+            )
+        if "ensure_inset_map" in operation_types:
+            self.strip_names.update(
+                {
+                    "ensure_inset_map",
+                    "add_inset_map",
+                    "create_inset_map",
+                    "ensure_overview_map",
+                }
+            )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST | None:
+        if node.name in self.strip_names:
+            return None
+        return self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST | None:
+        if _node_calls_any(node.value, self.strip_names):
+            return None
+        return self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST | None:
+        if node.value is not None and _node_calls_any(node.value, self.strip_names):
+            return None
+        return self.generic_visit(node)
+
+    def visit_Expr(self, node: ast.Expr) -> ast.AST | None:
+        if _node_calls_any(node.value, self.strip_names):
+            return None
+        return self.generic_visit(node)
+
+
+def _strip_generated_layout_operation_helpers(code: str, operation_types: set[str]) -> str:
+    if not operation_types:
+        return code
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    stripped_tree = _LayoutOperationStripper(operation_types).visit(tree)
+    ast.fix_missing_locations(stripped_tree)
+    try:
+        return ast.unparse(stripped_tree)
+    except Exception:  # noqa: BLE001
+        return code
+
+
+def _node_calls_any(node: ast.AST, names: set[str]) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        function_name = _call_function_name(child)
+        if function_name in names:
+            return True
+    return False
+
+
+def _call_function_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
 
 
 def _string_constant(node: ast.AST) -> Optional[str]:
@@ -2077,6 +2272,11 @@ def _generate_expert_tool_calls(
         "add it to the map with map_obj.addDataFromPath unless the user explicitly asks otherwise. "
         "After adding that raster, set the layout map frame extent to the added layer extent with "
         "approximately 8 percent padding. The script must create OUTPUT_PATH.\n\n"
+        "Runtime hard constraints: never call layout.createTextElement(...). This ArcGIS Pro "
+        "runtime does not provide that method on Layout. To create layout text, always call "
+        "aprx.createTextElement(layout, arcpy.Point(x, y), 'POINT', text, name='Title', "
+        "text_size=24). Also never pass 'TITLE' or 'TEXT' as the third createTextElement "
+        "positional argument; use 'POINT'.\n\n"
         "For text typography such as title font family, font size, or font style, prefer the "
         "run_arcpy_code text_styles argument instead of hand-writing ArcPy typography code. "
         "Use element_name such as Title when the target layout text element is known.\n\n"
@@ -2089,7 +2289,9 @@ def _generate_expert_tool_calls(
         "For creating or ensuring standard map production elements, prefer the run_arcpy_code "
         "layout_operations argument instead of hand-writing ArcPy surround code. Use "
         "ensure_scale_bar, ensure_north_arrow, ensure_grid, and ensure_inset_map for scale bars, "
-        "north arrows, map grids, and inset map frames.\n\n"
+        "north arrows, map grids, and inset map frames. When a requested scale bar, north arrow, "
+        "grid, or inset map is represented in layout_operations, do not also write helper "
+        "functions or direct ArcPy calls for that same layout operation in code.\n\n"
         "Use the following project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -2298,9 +2500,17 @@ def _generate_expert_run_arcpy_tool_call(
         "run_arcpy_code layout_elements argument when returning tool calls. Natural positions "
         "should use anchors such as bottom_left, top_right, or top_center, with offset_x/offset_y "
         "and units for requests such as moving up 1 cm.\n\n"
+        "Runtime hard constraints: never call layout.createTextElement(...). This ArcGIS Pro "
+        "runtime does not provide that method on Layout. To create layout text, always call "
+        "aprx.createTextElement(layout, arcpy.Point(x, y), 'POINT', text, name='Title', "
+        "text_size=24). Also never pass 'TITLE' or 'TEXT' as the third createTextElement "
+        "positional argument; use 'POINT'.\n\n"
         "For creating or ensuring standard map production elements, prefer the run_arcpy_code "
         "layout_operations argument. Use ensure_scale_bar, ensure_north_arrow, ensure_grid, "
-        "and ensure_inset_map for scale bars, north arrows, map grids, and inset map frames.\n\n"
+        "and ensure_inset_map for scale bars, north arrows, map grids, and inset map frames. "
+        "When a requested scale bar, north arrow, grid, or inset map is represented in "
+        "layout_operations, do not also write helper functions or direct ArcPy calls for that "
+        "same layout operation in code.\n\n"
         "Use this project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -2340,6 +2550,61 @@ def _expert_insert_index_after(tool_calls: List[Dict[str, Any]], tool_name: str)
 
 def _expert_context_has_prepared_dataset(context: Optional[AgentPageContext]) -> bool:
     return bool(context and context.prepared_dataset_path)
+
+
+def _expert_message_should_defer_map_code_until_image_selection(
+    message: str,
+    context: Optional[AgentPageContext],
+) -> bool:
+    return (
+        context is not None
+        and bool(context.collection)
+        and bool(context.bbox)
+        and _expert_message_requests_search(message)
+        and _expert_message_requests_map_output(message)
+        and not _expert_context_has_prepared_dataset(context)
+    )
+
+
+def _build_expert_image_selection_stage_tool_calls(
+    context: Optional[AgentPageContext],
+) -> List[Dict[str, Any]]:
+    search_arguments: Dict[str, Any] = {}
+    prepare_arguments: Dict[str, Any] = {}
+    if context is not None:
+        search_arguments = {
+            key: value
+            for key, value in {
+                "provider": context.provider,
+                "collection": context.collection,
+                "bbox": context.bbox,
+                "datetime": context.datetime,
+                "limit": context.limit,
+                "cloud_cover_lte": context.cloud_cover_lte,
+            }.items()
+            if value is not None
+        }
+        prepare_arguments = {
+            key: value
+            for key, value in {
+                "bands": context.bands,
+                "target_resolution": context.target_resolution,
+                "target_crs": context.target_crs,
+            }.items()
+            if value is not None
+        }
+    return _normalize_expert_tool_calls(
+        [
+            {
+                "name": _EXPERT_TOOL_SEARCH_REMOTE_SENSING_IMAGES,
+                "arguments": search_arguments,
+            },
+            {
+                "name": _EXPERT_TOOL_PREPARE_REMOTE_SENSING_BASEMAP,
+                "arguments": prepare_arguments,
+            },
+        ]
+    )
 
 
 def _expert_message_requests_search(message: str) -> bool:
@@ -2433,6 +2698,8 @@ def _select_expert_knowledge_files(message: str) -> List[str]:
     files = [
         "arcpy_runtime.md",
         "arcpy_export.md",
+        "arcpy_layout_text.md",
+        "arcpy_layout_elements.md",
         "templates/default.md",
     ]
 
