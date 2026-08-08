@@ -8,7 +8,7 @@
   "output_format": "geotiff",
   "output_purpose": "carto-render",
   "requested_by": "gyygeo-agent",
-  "prepare_strategy": "mpc_dynamic_tiles",
+  "prepare_strategy": "mpc_cog",
+  "fallback_strategy": "mpc_dynamic_tiles",
   "layer_name": "Prepared Remote Sensing Basemap"
 }
-

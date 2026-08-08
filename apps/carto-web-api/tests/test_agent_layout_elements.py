@@ -632,6 +632,7 @@ def test_remote_sensing_basemap_skill_builds_prepare_payload() -> None:
                 "bands": ["red", "green", "blue"],
                 "target_resolution": 30,
                 "target_crs": "EPSG:3857",
+                "overview_index": 0,
             },
         },
         {"item": {"item_id": "image-2"}},
@@ -641,6 +642,9 @@ def test_remote_sensing_basemap_skill_builds_prepare_payload() -> None:
     assert payload["bbox_crs"] == "EPSG:4326"
     assert payload["output"] == {"format": "geotiff", "purpose": "carto-render"}
     assert payload["metadata"]["skill_id"] == "remote_sensing_basemap"
+    assert payload["metadata"]["prepare_strategy"] == "mpc_cog"
+    assert payload["metadata"]["fallback_strategy"] == "mpc_dynamic_tiles"
+    assert payload["metadata"]["overview_index"] == 0
 
 
 def test_expert_prepare_tool_updates_context_with_prepared_dataset(monkeypatch) -> None:
@@ -877,6 +881,33 @@ layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)
     assert "ensure_scale_bar(layout, map_frame)" not in stripped
     assert "def keep_extent" in stripped
     assert "keep_extent()" in stripped
+    assert "aprx.save()" in stripped
+    assert "layout.exportToJPEG" in stripped
+
+
+def test_strip_generated_layout_operation_blocks_removes_create_map_grid_try_block() -> None:
+    stripped = _strip_generated_layout_operation_blocks(
+        """
+try:
+    existing_grids = map_frame.mapGrids
+except AttributeError:
+    existing_grids = []
+if not existing_grids:
+    try:
+        map_frame.createMapGrid('GRID', 'MapGrid')
+    except Exception:
+        map_frame.createMapGrid('GRID', 'MapGrid', 'Grid 1')
+title_text = CONTEXT.get('map_title', 'Landsat Map')
+aprx.save()
+layout.exportToJPEG(OUTPUT_PATH, resolution=DPI)
+""",
+        [{"type": "ensure_grid"}],
+    )
+
+    assert "existing_grids" not in stripped
+    assert "mapGrids" not in stripped
+    assert "createMapGrid" not in stripped
+    assert "title_text = CONTEXT.get" in stripped
     assert "aprx.save()" in stripped
     assert "layout.exportToJPEG" in stripped
 

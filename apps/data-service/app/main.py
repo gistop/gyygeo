@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes.cog import router as cog_router
 from app.api.routes.datasets import router as datasets_router
 from app.api.routes.downloads import router as downloads_router
 from app.api.routes.health import router as health_router
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(providers_router, prefix=settings.api_prefix)
     app.include_router(searches_router, prefix=settings.api_prefix)
+    app.include_router(cog_router, prefix=settings.api_prefix)
     app.include_router(tilejson_router, prefix=settings.api_prefix)
     app.include_router(downloads_router, prefix=settings.api_prefix)
     app.include_router(prepare_router, prefix=settings.api_prefix)

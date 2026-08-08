@@ -10,8 +10,10 @@ basemap. It is intentionally narrow and production-shaped:
 - Use the current map AOI as the confirmed study-area boundary.
 - Search remote-sensing imagery through `data-service`.
 - Select a candidate image by lowest cloud cover.
-- Prepare a render-ready raster through `data-service` using MPC dynamic tiles by default, so the
-  workflow reads only tiles needed for the AOI instead of downloading full COG assets.
+- Prepare a render-ready raster through `data-service` using MPC COG AOI/overview range reads by
+  default, so the workflow reads true raster pixels needed for the AOI and selected resolution
+  instead of downloading full COG assets.
+- Keep MPC dynamic tiles as a fallback path for preview-like rendering or unsupported COG assets.
 - Write a study-area boundary GeoJSON.
 - Render a map through `carto-engine`.
 - Run basic QA checks and return output paths.

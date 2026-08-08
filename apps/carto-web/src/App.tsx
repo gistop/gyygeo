@@ -47,6 +47,7 @@ import {
   getCartoHealth,
   getCartoWebApiHealth,
   getCartoJob,
+  getCogResolutions,
   getDataHealth,
   getDataJob,
   getPreviewTilejson,
@@ -63,6 +64,7 @@ import type {
   AiChatMessage,
   AoiMode,
   Bbox,
+  CogResolution,
   JobRecord,
   JobStatus,
   LayoutElementPosition,
@@ -161,6 +163,8 @@ export function App() {
   const [bands, setBands] = useState("red,green,blue");
   const [targetResolution, setTargetResolution] = useState("30");
   const [targetCrs, setTargetCrs] = useState("EPSG:3857");
+  const [rasterSourceStrategy, setRasterSourceStrategy] = useState("mpc_cog");
+  const [selectedOverviewIndex, setSelectedOverviewIndex] = useState("auto");
   const [mapTitle, setMapTitle] = useState("Landsat Map");
   const [layoutName, setLayoutName] = useState("Layout");
   const [dryRun, setDryRun] = useState(false);
@@ -254,6 +258,29 @@ export function App() {
     },
   });
 
+  const cogResolutionsQuery = useQuery({
+    queryKey: [
+      "cog-resolutions",
+      provider,
+      collection,
+      selectedItem?.item_id,
+      bands,
+    ],
+    queryFn: () =>
+      getCogResolutions({
+        provider,
+        collection,
+        item_id: selectedItem!.item_id,
+        bands: splitCsv(bands),
+      }),
+    enabled: Boolean(selectedItem && rasterSourceStrategy === "mpc_cog"),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const cogResolutions = useMemo<CogResolution[]>(() => {
+    return cogResolutionsQuery.data?.resolutions ?? [];
+  }, [cogResolutionsQuery.data]);
+
   const updatePreviewOpacity = useCallback((itemId: string, opacity: number) => {
     setPreviewLayers((current) =>
       current.map((layer) => (layer.itemId === itemId ? { ...layer, opacity } : layer)),
@@ -280,6 +307,13 @@ export function App() {
         target_resolution: optionalNumber(targetResolution),
         target_crs: targetCrs.trim() || undefined,
         requested_by: "carto-web",
+        metadata: {
+          prepare_strategy: rasterSourceStrategy,
+          fallback_strategy: "mpc_dynamic_tiles",
+          ...(selectedOverviewIndex !== "auto"
+            ? { overview_index: Number(selectedOverviewIndex) }
+            : {}),
+        },
         output: {
           format: "geotiff",
           purpose: "carto-render",
@@ -413,6 +447,8 @@ export function App() {
       bands: splitCsv(bands),
       target_resolution: optionalNumber(targetResolution),
       target_crs: targetCrs.trim() || undefined,
+      overview_index: selectedOverviewIndex !== "auto" ? Number(selectedOverviewIndex) : undefined,
+      raster_source_strategy: rasterSourceStrategy,
       map_title: mapTitle.trim() || undefined,
       layout_name: layoutName.trim() || undefined,
       prepared_dataset_path: preparedDatasetPath,
@@ -431,6 +467,8 @@ export function App() {
     limit,
     mapTitle,
     preparedDatasetPath,
+    rasterSourceStrategy,
+    selectedOverviewIndex,
     provider,
     targetCrs,
     targetResolution,
@@ -623,14 +661,55 @@ export function App() {
                     <input value={bands} onChange={(event) => setBands(event.target.value)} />
                   </label>
                   <label>
+                    Source
+                    <select
+                      value={rasterSourceStrategy}
+                      onChange={(event) => setRasterSourceStrategy(event.target.value)}
+                    >
+                      <option value="mpc_cog">COG AOI</option>
+                      <option value="mpc_dynamic_tiles">MPC tiles</option>
+                      <option value="rasterio_remote_cog">Rasterio COG</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="field-row">
+                  <label>
+                    COG Level
+                    <select
+                      value={selectedOverviewIndex}
+                      disabled={rasterSourceStrategy !== "mpc_cog" || cogResolutionsQuery.isFetching}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setSelectedOverviewIndex(value);
+                        const resolution = cogResolutions.find(
+                          (item) => String(item.overview_index) === value,
+                        );
+                        if (resolution) {
+                          setTargetResolution(formatResolutionValue(resolution.resolution_meters));
+                        }
+                      }}
+                    >
+                      <option value="auto">Auto</option>
+                      {cogResolutions.map((resolution) => (
+                        <option key={resolution.overview_index} value={resolution.overview_index}>
+                          {formatCogResolutionOption(resolution)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
                     Resolution
                     <input
                       inputMode="decimal"
                       value={targetResolution}
-                      onChange={(event) => setTargetResolution(event.target.value)}
+                      onChange={(event) => {
+                        setTargetResolution(event.target.value);
+                        setSelectedOverviewIndex("auto");
+                      }}
                     />
                   </label>
                 </div>
+                {cogResolutionsQuery.error ? <ErrorText error={cogResolutionsQuery.error} /> : null}
                 <label>
                   Target CRS
                   <input value={targetCrs} onChange={(event) => setTargetCrs(event.target.value)} />
@@ -2630,6 +2709,19 @@ function formatItemMeta(item: SearchItem): string {
     item.assets?.length ? `${item.assets.length} assets` : "",
   ].filter(Boolean);
   return pieces.join(" | ") || item.collection;
+}
+
+function formatResolutionValue(value: number): string {
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+  return value.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function formatCogResolutionOption(resolution: CogResolution): string {
+  const meters = formatResolutionValue(resolution.resolution_meters);
+  const label = resolution.overview_index === 0 ? "original" : `overview ${resolution.overview_index}`;
+  return `${meters}m ${label}`;
 }
 
 function statusIcon(status: JobStatus) {

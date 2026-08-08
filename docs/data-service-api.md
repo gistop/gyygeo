@@ -91,6 +91,11 @@ Example:
   "bands": ["red", "green", "blue"],
   "target_resolution": 120,
   "target_crs": "EPSG:3857",
+  "metadata": {
+    "prepare_strategy": "mpc_cog",
+    "fallback_strategy": "mpc_dynamic_tiles",
+    "overview_index": 2
+  },
   "output": {
     "format": "geotiff",
     "purpose": "carto-render"
@@ -98,11 +103,35 @@ Example:
 }
 ```
 
-This example has been verified as a working `landsat-c2-l2` preparation request for local
-development.
+The default MPC preparation strategy is `mpc_cog`: the service signs the STAC item, reads the
+selected COG overview by HTTP Range requests for the AOI window, optionally masks the polygon AOI,
+and writes a local render-ready GeoTIFF. `target_resolution` selects the closest COG overview unless
+`metadata.overview_index` is provided. `mpc_dynamic_tiles` remains available as a fallback strategy.
 
 The service creates an async job and a dataset record. When the job is done, the result contains a
 render-ready GeoTIFF path that can be passed to `carto-engine`.
+
+## COG Resolutions
+
+```http
+POST /api/v1/cog-resolutions
+Content-Type: application/json
+```
+
+Example:
+
+```json
+{
+  "provider": "mpc",
+  "collection": "landsat-c2-l2",
+  "item_id": "LC09_L2SP_123033_20250622_02_T1",
+  "bands": ["red", "green", "blue"]
+}
+```
+
+The response lists the COG overview levels for the first requested asset, including
+`overview_index`, `resolution_meters`, `decimation`, `width`, and `height`. The web console uses this
+for the manual resolution selector.
 
 ## Download Assets
 

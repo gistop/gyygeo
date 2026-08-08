@@ -78,10 +78,34 @@ export interface PreparePayload {
   target_resolution?: number;
   target_crs?: string;
   requested_by?: string;
+  metadata?: Record<string, unknown>;
   output: {
     format: "geotiff";
     purpose: "carto-render";
   };
+}
+
+export interface CogResolutionPayload {
+  provider: string;
+  collection: string;
+  item_id: string;
+  bands: string[];
+}
+
+export interface CogResolution {
+  overview_index: number;
+  decimation: number;
+  resolution_meters: number;
+  width: number;
+  height: number;
+}
+
+export interface CogResolutionResponse {
+  provider: string;
+  collection: string;
+  item_id: string;
+  asset_key: string;
+  resolutions: CogResolution[];
 }
 
 export interface TilejsonPayload {
@@ -162,6 +186,8 @@ export interface AgentPageContext {
   bands: string[];
   target_resolution?: number;
   target_crs?: string;
+  overview_index?: number;
+  raster_source_strategy?: string;
   map_title?: string;
   layout_name?: string;
   prepared_dataset_path?: string;

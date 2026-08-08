@@ -16,7 +16,8 @@ Current default basemap policy:
 - Bands: `red`, `green`, `blue`.
 - Target CRS: `EPSG:3857`.
 - Target resolution: `30`.
+- Prepare strategy: `mpc_cog`, using COG AOI/overview range reads.
+- Fallback strategy: `mpc_dynamic_tiles`.
 - Output: GeoTIFF for cartographic rendering.
 
 This skill does not render the final map. It prepares the raster that carto-engine will load.
-

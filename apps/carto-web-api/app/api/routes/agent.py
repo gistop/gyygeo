@@ -123,6 +123,11 @@ _EXPERT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                     },
                     "target_resolution": {"type": "number"},
                     "target_crs": {"type": "string"},
+                    "overview_index": {"type": "integer", "minimum": 0},
+                    "raster_source_strategy": {
+                        "type": "string",
+                        "enum": ["mpc_cog", "mpc_dynamic_tiles", "rasterio_remote_cog"],
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -303,6 +308,8 @@ class AgentPageContext(BaseModel):
     bands: List[str] = Field(default_factory=lambda: ["red", "green", "blue"])
     target_resolution: Optional[float] = None
     target_crs: Optional[str] = None
+    overview_index: Optional[int] = Field(default=None, ge=0)
+    raster_source_strategy: Optional[str] = None
     map_title: Optional[str] = None
     layout_name: Optional[str] = None
     prepared_dataset_path: Optional[str] = None
@@ -515,6 +522,8 @@ def _create_task(message: str, context: AgentPageContext) -> AgentTask:
             "bands": context.bands,
             "target_resolution": context.target_resolution,
             "target_crs": context.target_crs,
+            "overview_index": context.overview_index,
+            "raster_source_strategy": context.raster_source_strategy,
         },
         "layout": {
             "title": title,
@@ -1476,6 +1485,26 @@ def _normalize_expert_prepare_arguments(arguments: Dict[str, Any]) -> Dict[str, 
     target_crs = arguments.get("target_crs")
     if isinstance(target_crs, str) and target_crs.strip():
         normalized["target_crs"] = target_crs.strip()
+
+    overview_index = arguments.get("overview_index")
+    if overview_index is not None:
+        try:
+            normalized["overview_index"] = int(overview_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "prepare_remote_sensing_basemap overview_index must be an integer."
+            ) from exc
+        if normalized["overview_index"] < 0:
+            raise ValueError("prepare_remote_sensing_basemap overview_index must be non-negative.")
+
+    raster_source_strategy = arguments.get("raster_source_strategy")
+    if isinstance(raster_source_strategy, str) and raster_source_strategy.strip():
+        strategy = raster_source_strategy.strip()
+        if strategy not in {"mpc_cog", "mpc_dynamic_tiles", "rasterio_remote_cog"}:
+            raise ValueError(
+                "prepare_remote_sensing_basemap raster_source_strategy is not supported."
+            )
+        normalized["raster_source_strategy"] = strategy
     return normalized
 
 
@@ -1886,7 +1915,15 @@ def _strip_generated_layout_operation_blocks(
     if "ensure_inset_map" in operation_types:
         start_patterns.extend(("inset_matches =", "inset_mf =", "inset_frame_matches =", "inset_frame ="))
     if "ensure_grid" in operation_types:
-        start_patterns.extend(("grids =", "grid_matches ="))
+        start_patterns.extend(
+            (
+                "grids =",
+                "grid_matches =",
+                "existing_grids =",
+                "map_grids =",
+                "map_grid_matches =",
+            )
+        )
     if not start_patterns:
         return code
 
@@ -1917,6 +1954,7 @@ def _strip_generated_layout_operation_blocks(
 class _LayoutOperationStripper(ast.NodeTransformer):
     def __init__(self, operation_types: set[str]) -> None:
         self.strip_names: set[str] = set()
+        self.strip_attributes: set[str] = set()
         if "ensure_grid" in operation_types:
             self.strip_names.update(
                 {
@@ -1925,8 +1963,12 @@ class _LayoutOperationStripper(ast.NodeTransformer):
                     "create_grid",
                     "create_map_grid",
                     "add_map_grid",
+                    "createMapGrid",
+                    "addMapGrid",
+                    "addGrid",
                 }
             )
+            self.strip_attributes.update({"mapGrids", "grids"})
         if "ensure_scale_bar" in operation_types:
             self.strip_names.update(
                 {
@@ -1960,18 +2002,32 @@ class _LayoutOperationStripper(ast.NodeTransformer):
             return None
         return self.generic_visit(node)
 
+    def visit_If(self, node: ast.If) -> ast.AST | None:
+        if _node_contains_layout_operation(node, self.strip_names, self.strip_attributes):
+            return None
+        return self.generic_visit(node)
+
+    def visit_Try(self, node: ast.Try) -> ast.AST | None:
+        if _node_contains_layout_operation(node, self.strip_names, self.strip_attributes):
+            return None
+        return self.generic_visit(node)
+
     def visit_Assign(self, node: ast.Assign) -> ast.AST | None:
-        if _node_calls_any(node.value, self.strip_names):
+        if _node_contains_layout_operation(node, self.strip_names, self.strip_attributes):
             return None
         return self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST | None:
-        if node.value is not None and _node_calls_any(node.value, self.strip_names):
+        if node.value is not None and _node_contains_layout_operation(
+            node,
+            self.strip_names,
+            self.strip_attributes,
+        ):
             return None
         return self.generic_visit(node)
 
     def visit_Expr(self, node: ast.Expr) -> ast.AST | None:
-        if _node_calls_any(node.value, self.strip_names):
+        if _node_contains_layout_operation(node, self.strip_names, self.strip_attributes):
             return None
         return self.generic_visit(node)
 
@@ -1999,6 +2055,21 @@ def _node_calls_any(node: ast.AST, names: set[str]) -> bool:
         if function_name in names:
             return True
     return False
+
+
+def _node_references_any_attribute(node: ast.AST, attributes: set[str]) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Attribute) and child.attr in attributes:
+            return True
+    return False
+
+
+def _node_contains_layout_operation(
+    node: ast.AST,
+    names: set[str],
+    attributes: set[str],
+) -> bool:
+    return _node_calls_any(node, names) or _node_references_any_attribute(node, attributes)
 
 
 def _call_function_name(node: ast.Call) -> str:
@@ -2117,6 +2188,8 @@ def _create_expert_map_spec(
         "bands": context.bands if context else ["red", "green", "blue"],
         "target_resolution": context.target_resolution if context else None,
         "target_crs": context.target_crs if context else None,
+        "overview_index": context.overview_index if context else None,
+        "raster_source_strategy": context.raster_source_strategy if context else None,
     }
     map_spec = {
         "schema_version": "0.1",
@@ -2164,7 +2237,13 @@ def _expert_map_spec_with_arguments(
     for key in ("provider", "collection", "datetime", "limit", "cloud_cover_lte"):
         if key in arguments:
             next_spec["basemap"][key] = arguments[key]
-    for key in ("bands", "target_resolution", "target_crs"):
+    for key in (
+        "bands",
+        "target_resolution",
+        "target_crs",
+        "overview_index",
+        "raster_source_strategy",
+    ):
         if key in arguments:
             next_spec["basemap"][key] = arguments[key]
     return next_spec
@@ -2291,7 +2370,9 @@ def _generate_expert_tool_calls(
         "ensure_scale_bar, ensure_north_arrow, ensure_grid, and ensure_inset_map for scale bars, "
         "north arrows, map grids, and inset map frames. When a requested scale bar, north arrow, "
         "grid, or inset map is represented in layout_operations, do not also write helper "
-        "functions or direct ArcPy calls for that same layout operation in code.\n\n"
+        "functions or direct ArcPy calls for that same layout operation in code. Never call "
+        "map_frame.createMapGrid(...), map_frame.addMapGrid(...), or map_frame.addGrid(...) in "
+        "generated code; map grids must be represented with layout_operations ensure_grid.\n\n"
         "Use the following project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )
@@ -2510,7 +2591,9 @@ def _generate_expert_run_arcpy_tool_call(
         "and ensure_inset_map for scale bars, north arrows, map grids, and inset map frames. "
         "When a requested scale bar, north arrow, grid, or inset map is represented in "
         "layout_operations, do not also write helper functions or direct ArcPy calls for that "
-        "same layout operation in code.\n\n"
+        "same layout operation in code. Never call map_frame.createMapGrid(...), "
+        "map_frame.addMapGrid(...), or map_frame.addGrid(...) in generated code; map grids must "
+        "be represented with layout_operations ensure_grid.\n\n"
         "Use this project knowledge as authoritative runtime guidance:\n\n"
         f"{knowledge_prompt}"
     )

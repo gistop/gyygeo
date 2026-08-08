@@ -21,6 +21,13 @@ If one of these operations is present in `layout_operations`, do not hand-write 
 or direct ArcPy calls for the same operation in `run_arcpy_code`. The carto-engine applies these
 operations after the base script succeeds.
 
+Hard constraints:
+
+- Do not call `map_frame.createMapGrid(...)`; ArcGIS Pro `MapFrame` does not provide this method.
+- Do not call `map_frame.addGrid(...)` or `map_frame.addMapGrid(...)` from generated expert code.
+- For map grids or graticules, add `{"type": "ensure_grid"}` to `layout_operations` and let
+  carto-engine create the grid with the verified style workflow.
+
 Move an existing element:
 
 ```python

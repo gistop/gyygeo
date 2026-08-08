@@ -5,6 +5,8 @@ import type {
   AgentTask,
   AiChatPayload,
   AiChatResponse,
+  CogResolutionPayload,
+  CogResolutionResponse,
   HealthResponse,
   JobCreateResponse,
   JobRecord,
@@ -78,6 +80,13 @@ export function searchItems(payload: SearchPayload): Promise<SearchResponse> {
 
 export function prepareRaster(payload: PreparePayload): Promise<JobCreateResponse> {
   return requestJson<JobCreateResponse>(`${config.dataServiceUrl}/api/v1/prepare-jobs`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getCogResolutions(payload: CogResolutionPayload): Promise<CogResolutionResponse> {
+  return requestJson<CogResolutionResponse>(`${config.dataServiceUrl}/api/v1/cog-resolutions`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

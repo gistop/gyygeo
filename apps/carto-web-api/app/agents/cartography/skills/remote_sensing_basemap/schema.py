@@ -15,7 +15,8 @@ class RemoteSensingBasemapPolicy(BaseModel):
     output_format: Literal["geotiff"] = "geotiff"
     output_purpose: Literal["carto-render"] = "carto-render"
     requested_by: str = "gyygeo-agent"
-    prepare_strategy: str = "mpc_dynamic_tiles"
+    prepare_strategy: str = "mpc_cog"
+    fallback_strategy: str = "mpc_dynamic_tiles"
     layer_name: str = "Prepared Remote Sensing Basemap"
 
 
@@ -33,5 +34,4 @@ class RemoteSensingBasemapPrepareRequest(BaseModel):
     target_crs: Optional[str] = None
     requested_by: str
     output: dict[str, str]
-    metadata: dict[str, str]
-
+    metadata: dict[str, Any]

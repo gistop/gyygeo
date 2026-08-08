@@ -25,6 +25,7 @@ def build_prepare_payload(
     item = selected_item["item"]
     basemap = map_spec["basemap"]
     study_area = map_spec["study_area"]
+    prepare_strategy = basemap.get("raster_source_strategy") or policy.prepare_strategy
     request = RemoteSensingBasemapPrepareRequest(
         provider=basemap["provider"],
         collection=basemap["collection"],
@@ -39,8 +40,14 @@ def build_prepare_payload(
         output={"format": policy.output_format, "purpose": policy.output_purpose},
         metadata={
             "agent_task_kind": str(map_spec.get("map_kind") or "expert_tool_call"),
-            "prepare_strategy": policy.prepare_strategy,
+            "prepare_strategy": prepare_strategy,
+            "fallback_strategy": policy.fallback_strategy,
             "skill_id": policy.skill_id,
+            **(
+                {"overview_index": basemap["overview_index"]}
+                if basemap.get("overview_index") is not None
+                else {}
+            ),
         },
     )
     return request.model_dump(exclude_none=True)
